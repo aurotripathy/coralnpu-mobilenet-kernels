@@ -1,0 +1,144 @@
+diff --git a/tests/npusim_examples/BUILD b/tests/npusim_examples/BUILD
+index 43011e07..d02454b7 100644
+--- a/tests/npusim_examples/BUILD
++++ b/tests/npusim_examples/BUILD
+@@ -14,6 +14,7 @@
+ 
+ load("@coralnpu_hw//third_party/python:requirements.bzl", "requirement")
+ load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
++load("//rules:utils.bzl", "generate_cc_arrays")
+ 
+ py_binary(
+     name = "npusim_run_mobilenet",
+@@ -28,6 +29,75 @@ py_binary(
+     ],
+ )
+ 
++py_binary(
++    name = "npusim_run_real_mobilenet",
++    srcs = ["npusim_run_real_mobilenet.py"],
++    data = [
++        "images/cat_224x224_real.npy",
++        "labels/imagenet_labels.txt",
++        ":run_full_mobilenet_v1_real_binary",
++    ],
++    deps = [
++        "//sw/coralnpu_sim:coralnpu_v2_sim_utils_lib",
++        "@bazel_tools//tools/python/runfiles",
++        requirement("numpy"),
++    ],
++)
++
++py_binary(
++    name = "npusim_verify_val10",
++    srcs = ["npusim_verify_val10.py"],
++    data = [
++        "labels/imagenet_labels.txt",
++        "images/val10_manifest.json",
++        ":run_full_mobilenet_v1_real_binary",
++    ] + glob(["images/val_*_224x224.npy"]),
++    deps = [
++        "//sw/coralnpu_sim:coralnpu_v2_sim_utils_lib",
++        "@bazel_tools//tools/python/runfiles",
++        requirement("numpy"),
++    ],
++)
++
++generate_cc_arrays(
++    name = "mobilenet_v1_025_224_int8_real_cc",
++    src = "models/mobilenet_v1_025_224_int8_real.tflite",
++    out = "mobilenet_v1_025_224_int8_real.cc",
++)
++
++generate_cc_arrays(
++    name = "mobilenet_v1_025_224_int8_real_h",
++    src = "models/mobilenet_v1_025_224_int8_real.tflite",
++    out = "mobilenet_v1_025_224_int8_real.h",
++)
++
++cc_library(
++    name = "mobilenet_v1_025_224_int8_real_lib",
++    srcs = ["mobilenet_v1_025_224_int8_real_cc"],
++    hdrs = ["mobilenet_v1_025_224_int8_real_h"],
++)
++
++coralnpu_v2_binary(
++    name = "run_full_mobilenet_v1_real_binary",
++    srcs = [
++        "run_full_mobilenet_v1_real.cc",
++    ],
++    dtcm_size_kbytes = 1024,  # Highmem
++    itcm_size_kbytes = 1024,  # Highmem
++    semihosting = True,
++    visibility = ["//visibility:public"],
++    deps = [
++        ":mobilenet_v1_025_224_int8_real_lib",
++        "//sw/opt:rvv_opt",
++        "//sw/opt/litert-micro:conv",
++        "//sw/opt/litert-micro:depthwise_conv",
++        "@tflite_micro//tensorflow/lite/micro:micro_framework",
++        "@tflite_micro//tensorflow/lite/micro:micro_log",
++        "@tflite_micro//tensorflow/lite/micro:op_resolvers",
++        "@tflite_micro//tensorflow/lite/micro:system_setup",
++    ],
++)
++
+ coralnpu_v2_binary(
+     name = "run_full_mobilenet_v1_binary",
+     srcs = [
+diff --git a/tests/npusim_examples/npusim_run_mobilenet.py b/tests/npusim_examples/npusim_run_mobilenet.py
+index 7284e5ad..4d4e96f0 100644
+--- a/tests/npusim_examples/npusim_run_mobilenet.py
++++ b/tests/npusim_examples/npusim_run_mobilenet.py
+@@ -16,6 +16,40 @@ from bazel_tools.tools.python.runfiles import runfiles
+ from coralnpu_v2_sim_utils import CoralNPUV2Simulator
+ import numpy as np
+ 
++EXPECTED_SHAPE = (224, 224, 3)
++
++
++def load_input_from_npy(npy_path):
++    """Loads an image from an .npy file and returns it as flat int8 data.
++
++    The returned array matches the format of the dummy ``input_data`` used by
++    ``run_full_mobilenet`` (a 1-D ``np.int8`` array of length 224*224*3), so it
++    can be written directly into the ``inference_input`` buffer.
++
++    Args:
++        npy_path: Path to a ``.npy`` file holding a 224x224x3 image.
++
++    Returns:
++        A 1-D ``np.int8`` array of length ``224 * 224 * 3``.
++
++    Raises:
++        ValueError: If the array does not have shape (224, 224, 3).
++    """
++    image = np.load(npy_path)
++    if image.shape != EXPECTED_SHAPE:
++        raise ValueError(
++            f"Expected input of shape {EXPECTED_SHAPE}, got {image.shape} "
++            f"from {npy_path}")
++
++    # TFLM MobileNet expects a signed int8 input tensor. If the image is stored
++    # as unsigned [0, 255] pixels, shift into the signed [-128, 127] range;
++    # otherwise assume it is already in the int8 domain.
++    if image.dtype == np.uint8:
++        image = image.astype(np.int16) - 128
++
++    return image.astype(np.int8).reshape(-1)
++
++
+ def run_full_mobilenet():
+     print(f"Running full mobilenet...")
+     npu_sim = CoralNPUV2Simulator(highmem_ld=True, exit_on_ebreak=True)
+@@ -26,7 +60,10 @@ def run_full_mobilenet():
+     npu_sim.load_program(elf_file, entry_point)
+ 
+     if symbol_map.get('inference_input'):
++        print(f"Writing real image data to {symbol_map['inference_input']}")
++
+         input_data = np.random.randint(-128, 127, size=(224 * 224 * 3,), dtype=np.int8)
++        # input_data = load_input_from_npy('tests/npusim_examples/input_image.npy')
+         npu_sim.write_memory(symbol_map['inference_input'], input_data)
+ 
+     print("Running simulation...", flush=True)

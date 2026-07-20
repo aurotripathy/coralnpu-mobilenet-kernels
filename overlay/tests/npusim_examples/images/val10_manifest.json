@@ -1,0 +1,52 @@
+[
+  {
+    "npy": "val_0025_European_fire_salamander_224x224.npy",
+    "class_index": 25,
+    "label": "European_fire_salamander"
+  },
+  {
+    "npy": "val_0104_wallaby_224x224.npy",
+    "class_index": 104,
+    "label": "wallaby"
+  },
+  {
+    "npy": "val_0114_slug_224x224.npy",
+    "class_index": 114,
+    "label": "slug"
+  },
+  {
+    "npy": "val_0142_dowitcher_224x224.npy",
+    "class_index": 142,
+    "label": "dowitcher"
+  },
+  {
+    "npy": "val_0228_komondor_224x224.npy",
+    "class_index": 228,
+    "label": "komondor"
+  },
+  {
+    "npy": "val_0250_Siberian_husky_224x224.npy",
+    "class_index": 250,
+    "label": "Siberian_husky"
+  },
+  {
+    "npy": "val_0281_tabby_224x224.npy",
+    "class_index": 281,
+    "label": "tabby"
+  },
+  {
+    "npy": "val_0654_minibus_224x224.npy",
+    "class_index": 654,
+    "label": "minibus"
+  },
+  {
+    "npy": "val_0754_radio_224x224.npy",
+    "class_index": 754,
+    "label": "radio"
+  },
+  {
+    "npy": "val_0759_reflex_camera_224x224.npy",
+    "class_index": 759,
+    "label": "reflex_camera"
+  }
+]

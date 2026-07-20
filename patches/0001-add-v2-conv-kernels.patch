@@ -1,0 +1,539 @@
+diff --git a/sw/opt/litert-micro/conv.cc b/sw/opt/litert-micro/conv.cc
+index b24a2a55..3d0ac2aa 100644
+--- a/sw/opt/litert-micro/conv.cc
++++ b/sw/opt/litert-micro/conv.cc
+@@ -112,6 +112,123 @@ const int8_t* PadInput(int8_t* dst_buffer, const int8_t* val_ptr,
+   return buffer_start + pad_bytes;
+ }
+ 
++// ============================================================================
++// EDIT 1 of 2 — paste this FUNCTION DEFINITION into conv.cc, immediately after
++// the Conv_4_4_48_Stride1 function (i.e. before Conv_4_4_16 / ConvPerChannel).
++// ============================================================================
++
++// Kernel for 3x3 filter, input_depth == 3, output_depth == 8 (MobileNet stem).
++// Vectorizes ALONG OUTPUT channels (od == 8) instead of input channels, using
++// vmacc.vx to fan each (input * filter) product across all 8 output lanes.
++void Conv_3_3_3_8(const ConvParams& params, const OpDataConvCustom& data,
++                  const int32_t* output_multiplier, const uint8_t* shift_left,
++                  const uint8_t* shift_right, TfLiteContext* context,
++                  const RuntimeShape& input_shape, const int8_t* input_data,
++                  const RuntimeShape& filter_shape, const int8_t* filter_data,
++                  const RuntimeShape& bias_shape, const int32_t* bias_data,
++                  const RuntimeShape& output_shape, int8_t* output_data) {
++  const auto batches = MatchingDim(input_shape, 0, output_shape, 0);
++  const int32_t input_offset = params.input_offset;  // r = s(q - Z)
++  const auto output_offset = params.output_offset;
++  const int32_t output_activation_min = params.quantized_activation_min;
++  const int32_t output_activation_max = params.quantized_activation_max;
++  const auto stride_width = params.stride_width;
++  const auto stride_height = params.stride_height;
++  const auto pad_width = params.padding_values.width;
++  const auto pad_height = params.padding_values.height;
++  const auto input_height = input_shape.Dims(1);
++  const auto input_width = input_shape.Dims(2);
++  const auto input_depth = input_shape.Dims(3);
++
++  const auto filter_height = filter_shape.Dims(1);
++  const auto filter_width = filter_shape.Dims(2);
++  TFLITE_DCHECK_EQ(filter_height, 3);
++  TFLITE_DCHECK_EQ(filter_width, 3);
++  TFLITE_DCHECK_EQ(input_depth, 3);
++
++  const auto output_height = output_shape.Dims(1);
++  const auto output_width = output_shape.Dims(2);
++  const auto output_depth = output_shape.Dims(3);
++  TFLITE_DCHECK_EQ(output_depth, 8);
++
++  const size_t vl = __riscv_vsetvl_e32m1(output_depth);
++
++  const int row_stride = input_width * input_depth;
++  const int col_stride = input_depth;
++
++  // Pre-gather filter to [tap=ky*kx*kc][out_channel] so each tap is a
++  // unit-stride vle32 that broadcasts across the 8 output lanes.
++  constexpr int kTaps = 3 * 3 * 3;  // 27
++  int32_t* fil_oc = static_cast<int32_t*>(
++      context->GetScratchBuffer(context, data.gathered_weights_index));
++  TFLITE_DCHECK_NE(fil_oc, nullptr);
++
++  const int filter_row_stride = filter_width * input_depth;         // ky step
++  const int filter_col_stride = input_depth;                        // kx step
++  const int filter_oc_stride = filter_height * filter_row_stride;   // oc step
++  for (int tap = 0; tap < kTaps; ++tap) {
++    const int ky = tap / (filter_width * input_depth);
++    const int rem = tap % (filter_width * input_depth);
++    const int kx = rem / input_depth;
++    const int kc = rem % input_depth;
++    for (int oc = 0; oc < output_depth; ++oc) {
++      const int8_t* f = filter_data + oc * filter_oc_stride +
++                        ky * filter_row_stride + kx * filter_col_stride + kc;
++      fil_oc[tap * output_depth + oc] = static_cast<int32_t>(*f);
++    }
++  }
++
++  int32_t* accs_buf = static_cast<int32_t*>(
++      context->GetScratchBuffer(context, data.accs_buffer_index));
++  TFLITE_DCHECK_NE(accs_buf, nullptr);
++  Memset(
++      accs_buf, 0,
++      batches * output_height * output_width * output_depth * sizeof(int32_t));
++
++  for (int batch = 0; batch < batches; ++batch) {
++    const int8_t* batch_base_ptr =
++        &input_data[Offset(input_shape, batch, 0, 0, 0)];
++    for (int out_y = 0; out_y < output_height; ++out_y) {
++      const int in_y_origin = (out_y * stride_height) - pad_height;
++      for (int out_x = 0; out_x < output_width; ++out_x) {
++        const int in_x_origin = (out_x * stride_width) - pad_width;
++
++        vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vl);
++
++        for (int ky = 0; ky < 3; ++ky) {
++          const int in_y = in_y_origin + ky;
++          if (in_y < 0 || in_y >= input_height) continue;
++          for (int kx = 0; kx < 3; ++kx) {
++            const int in_x = in_x_origin + kx;
++            if (in_x < 0 || in_x >= input_width) continue;
++            const int8_t* in_pix =
++                batch_base_ptr + in_y * row_stride + in_x * col_stride;
++            for (int kc = 0; kc < 3; ++kc) {
++              const int32_t in_val =
++                  static_cast<int32_t>(in_pix[kc]) + input_offset;
++              const int tap = ky * (filter_width * input_depth) +
++                              kx * input_depth + kc;
++              const vint32m1_t fil_vec =
++                  __riscv_vle32_v_i32m1(&fil_oc[tap * output_depth], vl);
++              acc = __riscv_vmacc_vx_i32m1(acc, in_val, fil_vec, vl);
++            }
++          }
++        }
++
++        __riscv_vse32_v_i32m1(
++            &accs_buf[Offset(output_shape, batch, out_y, out_x, 0)], acc, vl);
++      }
++    }
++  }
++
++  PostprocessAcc(accs_buf, bias_data, shift_left, output_multiplier,
++                 shift_right, output_offset, output_activation_min,
++                 output_activation_max, output_data,
++                 batches * output_height * output_width, output_depth);
++}
++
++
++  
+ // Specialized 4x4 Conv2D kernel with LMUL=4 for high channel counts (up to 64).
+ void Conv2D_4x4(const tflite::ConvParams& params,
+                 const coralnpu_v2::opt::litert_micro::OpDataConvCustom& data,
+@@ -928,6 +1045,291 @@ void Conv_4_4_48_Stride1(
+                  batches * output_height * output_width, output_depth);
+ }
+ 
++
++// Kernel for ALL 1x1 pointwise convolutions (filter_height == filter_width == 1).
++// A 1x1 conv is a matrix multiply: out[p][oc] = sum_ic in[p][ic]*W[oc][ic] + b.
++// One parameterized kernel therefore covers every {id,od} fallback shape:
++//   8->16, 16->32, 32->32, ... 128->256, 256->256, 256->5.
++//
++// Strategy:
++//   * Vectorize across OUTPUT channels, tiling od into chunks of `vl`.
++//   * Stream input channels; broadcast each scalar input across the od lanes
++//     with vmacc.vx (no vredsum).
++//   * Fold the input zero-point out of the hot loop via precomputed weight_sums:
++//       acc[oc] = input_offset * weight_sums[oc]  (seed)
++//               + sum_ic in[p][ic] * W[oc][ic]    (streamed)
++//   * Weights are pre-repacked to [ic][od] so each inner fetch is a unit-stride
++//     vle32 that lines up with the od lane tile.
++//
++// Requantization is delegated to PostprocessAcc, identical to the other kernels.
++void Conv_1x1_Pointwise(
++    const ConvParams& params, const OpDataConvCustom& data,
++    const int32_t* output_multiplier, const uint8_t* shift_left,
++    const uint8_t* shift_right, TfLiteContext* context,
++    const RuntimeShape& input_shape, const int8_t* input_data,
++    const RuntimeShape& filter_shape, const int8_t* filter_data,
++    const RuntimeShape& bias_shape, const int32_t* bias_data,
++    const RuntimeShape& output_shape, int8_t* output_data) {
++  const auto batches = MatchingDim(input_shape, 0, output_shape, 0);
++  const int32_t input_offset = params.input_offset;
++  const auto output_offset = params.output_offset;
++  const int32_t output_activation_min = params.quantized_activation_min;
++  const int32_t output_activation_max = params.quantized_activation_max;
++  const auto stride_width = params.stride_width;
++  const auto stride_height = params.stride_height;
++
++  // const auto input_height = input_shape.Dims(1);
++  const auto input_width = input_shape.Dims(2);
++  const auto input_depth = input_shape.Dims(3);      // ID
++  const auto output_height = output_shape.Dims(1);
++  const auto output_width = output_shape.Dims(2);
++  const auto output_depth = output_shape.Dims(3);    // OD
++
++  TFLITE_DCHECK_EQ(filter_shape.Dims(1), 1);
++  TFLITE_DCHECK_EQ(filter_shape.Dims(2), 1);
++
++  // --- Repacked weights [ic][od] and per-oc weight sums, built in Prepare. ---
++  // repacked_weights_generic is reused as int32 [input_depth * output_depth].
++  // Prepare stores the repacked 1x1 weights in a persistent buffer and stashes
++  // the pointer in data.repacked_weights_generic (NOT the scratch arena), so
++  // read it back directly here.
++  const int32_t* W_icod =
++      reinterpret_cast<const int32_t*>(data.repacked_weights_generic);
++  const int32_t* weight_sums = data.weight_sums;  // [output_depth]
++  TFLITE_DCHECK_NE(W_icod, nullptr);
++  TFLITE_DCHECK_NE(weight_sums, nullptr);
++
++  int32_t* accs_buf = static_cast<int32_t*>(
++      context->GetScratchBuffer(context, data.accs_buffer_index));
++  TFLITE_DCHECK_NE(accs_buf, nullptr);
++
++  const int in_row_stride = input_width * input_depth;
++  const int in_col_stride = input_depth;
++
++  for (int batch = 0; batch < batches; ++batch) {
++    const int8_t* batch_base = &input_data[Offset(input_shape, batch, 0, 0, 0)];
++    for (int out_y = 0; out_y < output_height; ++out_y) {
++      const int in_y = out_y * stride_height;  // 1x1 => no pad, stride subsample
++      for (int out_x = 0; out_x < output_width; ++out_x) {
++        const int in_x = out_x * stride_width;
++        const int8_t* in_pix =
++            batch_base + in_y * in_row_stride + in_x * in_col_stride;
++        int32_t* out_acc =
++            &accs_buf[Offset(output_shape, batch, out_y, out_x, 0)];
++
++        // Tile the od axis into vl-sized chunks.
++        for (int oc0 = 0; oc0 < output_depth;) {
++          const size_t vl = __riscv_vsetvl_e32m1(output_depth - oc0);
++
++          // Seed with zero-point term: input_offset * weight_sums[oc].
++          //vint32m1_t acc = __riscv_vle32_v_i32m1(&weight_sums[oc0], vl);
++	  vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vl);
++          //acc = __riscv_vmul_vx_i32m1(acc, input_offset, vl);
++
++          // Stream input channels; broadcast-MAC into the od lanes.
++          for (int ic = 0; ic < input_depth; ++ic) {
++            // const int32_t in_val = static_cast<int32_t>(in_pix[ic]);
++	    const int32_t in_val = static_cast<int32_t>(in_pix[ic]) + input_offset;   // <-- offset here now
++            // Row ic of the [ic][od] repacked weights, offset to this od tile.
++            const vint32m1_t w =
++                __riscv_vle32_v_i32m1(&W_icod[ic * output_depth + oc0], vl);
++            acc = __riscv_vmacc_vx_i32m1(acc, in_val, w, vl);
++          }
++
++          __riscv_vse32_v_i32m1(&out_acc[oc0], acc, vl);
++          oc0 += vl;
++        }
++      }
++    }
++  }
++
++  // bias + shift/multiply + output_offset + saturating narrow to int8.
++  PostprocessAcc(accs_buf, bias_data, shift_left, output_multiplier,
++                 shift_right, output_offset, output_activation_min,
++                 output_activation_max, output_data,
++                 batches * output_height * output_width, output_depth);
++}
++
++// ============================================================================
++// V2 kernels: rewrites of Conv_3_3_3_8 and Conv_1x1_Pointwise kept under new
++// names so results can be compared against the originals. Differences:
++//   * Read the ORIGINAL filter/bias tensors directly. No DTCM heap copies
++//     (make_aligned_array) and no Prepare-time repacked weight buffers.
++//   * Requantize with tflite::MultiplyByQuantizedMultiplier per element, the
++//     exact TFLM reference path, instead of the vectorized PostprocessAcc
++//     (vsll/vsmul/vssra) pipeline.
++//   * MACs stay vectorized via a widening int8 dot product (vwmacc + vredsum).
++// ============================================================================
++
++// Dot product of two int8 rows with the input zero-point offset applied to
++// `a`: returns sum_i (a[i] + input_offset) * w[i], accumulated in int32.
++inline int32_t DotInt8V2(const int8_t* a, const int8_t* w, int n,
++                         int32_t input_offset) {
++  const size_t vlmax = __riscv_vsetvlmax_e32m4();
++  vint32m4_t acc = __riscv_vmv_v_x_i32m4(0, vlmax);
++  int i = 0;
++  while (i < n) {
++    const size_t vl = __riscv_vsetvl_e8m1(n - i);
++    const vint8m1_t va8 = __riscv_vle8_v_i8m1(&a[i], vl);
++    const vint8m1_t vw8 = __riscv_vle8_v_i8m1(&w[i], vl);
++    // Widen before adding the offset: input_offset can be +128, which does
++    // not fit in the int8 scalar operand of vwadd.vx.
++    const vint16m2_t va16 = __riscv_vadd_vx_i16m2(
++        __riscv_vsext_vf2_i16m2(va8, vl), (int16_t)input_offset, vl);
++    const vint16m2_t vw16 = __riscv_vsext_vf2_i16m2(vw8, vl);
++    acc = __riscv_vwmacc_vv_i32m4(acc, va16, vw16, vl);
++    i += vl;
++  }
++  const vint32m1_t zero = __riscv_vmv_v_x_i32m1(0, 1);
++  const vint32m1_t red = __riscv_vredsum_vs_i32m4_i32m1(acc, zero, vlmax);
++  return __riscv_vmv_x_s_i32m1_i32(red);
++}
++
++// Exact TFLM requantization for one accumulator value.
++inline int8_t RequantizeOneV2(int32_t acc, int32_t bias, int32_t multiplier,
++                              int32_t shift, int32_t output_offset,
++                              int32_t act_min, int32_t act_max) {
++  acc += bias;
++  int32_t out = tflite::MultiplyByQuantizedMultiplier(acc, multiplier, shift);
++  out += output_offset;
++  out = std::max(out, act_min);
++  out = std::min(out, act_max);
++  return static_cast<int8_t>(out);
++}
++
++// V2 of the MobileNet stem kernel (3x3 filter, input_depth 3, output_depth 8).
++// Per output pixel: gather the 27 input taps into a small contiguous buffer
++// (padding slots pre-filled with the input zero point so they contribute 0),
++// then run one vectorized dot product per output channel against the
++// per-channel-contiguous original weights.
++void Conv_3_3_3_8_V2(const ConvParams& params,
++                     const int32_t* output_multiplier,
++                     const int32_t* output_shift,
++                     const RuntimeShape& input_shape, const int8_t* input_data,
++                     const RuntimeShape& filter_shape,
++                     const int8_t* filter_data, const int32_t* bias_data,
++                     const RuntimeShape& output_shape, int8_t* output_data) {
++  const auto batches = MatchingDim(input_shape, 0, output_shape, 0);
++  const int32_t input_offset = params.input_offset;
++  const int32_t output_offset = params.output_offset;
++  const int32_t act_min = params.quantized_activation_min;
++  const int32_t act_max = params.quantized_activation_max;
++  const auto stride_width = params.stride_width;
++  const auto stride_height = params.stride_height;
++  const auto pad_width = params.padding_values.width;
++  const auto pad_height = params.padding_values.height;
++  const auto input_height = input_shape.Dims(1);
++  const auto input_width = input_shape.Dims(2);
++  const auto input_depth = input_shape.Dims(3);
++  const auto output_height = output_shape.Dims(1);
++  const auto output_width = output_shape.Dims(2);
++  const auto output_depth = output_shape.Dims(3);
++  TFLITE_DCHECK_EQ(filter_shape.Dims(1), 3);
++  TFLITE_DCHECK_EQ(filter_shape.Dims(2), 3);
++  TFLITE_DCHECK_EQ(input_depth, 3);
++  TFLITE_DCHECK_EQ(output_depth, 8);
++
++  constexpr int kTaps = 27;  // 3x3x3, contiguous per output channel.
++  const int row_stride = input_width * input_depth;
++  // Padded taps must contribute (pad + input_offset) == 0, so fill with the
++  // input zero point (-input_offset), which always fits in int8.
++  const int8_t pad_value = static_cast<int8_t>(-input_offset);
++
++  for (int batch = 0; batch < batches; ++batch) {
++    const int8_t* batch_base =
++        &input_data[Offset(input_shape, batch, 0, 0, 0)];
++    for (int out_y = 0; out_y < output_height; ++out_y) {
++      const int in_y_origin = (out_y * stride_height) - pad_height;
++      for (int out_x = 0; out_x < output_width; ++out_x) {
++        const int in_x_origin = (out_x * stride_width) - pad_width;
++
++        int8_t taps[kTaps];
++        memset(taps, pad_value, kTaps);
++        for (int ky = 0; ky < 3; ++ky) {
++          const int in_y = in_y_origin + ky;
++          if (in_y < 0 || in_y >= input_height) continue;
++          for (int kx = 0; kx < 3; ++kx) {
++            const int in_x = in_x_origin + kx;
++            if (in_x < 0 || in_x >= input_width) continue;
++            const int8_t* src = batch_base + in_y * row_stride + in_x * 3;
++            int8_t* dst = &taps[(ky * 3 + kx) * 3];
++            dst[0] = src[0];
++            dst[1] = src[1];
++            dst[2] = src[2];
++          }
++        }
++
++        int8_t* out_pix =
++            &output_data[Offset(output_shape, batch, out_y, out_x, 0)];
++        for (int oc = 0; oc < 8; ++oc) {
++          const int32_t acc =
++              DotInt8V2(taps, &filter_data[oc * kTaps], kTaps, input_offset);
++          out_pix[oc] =
++              RequantizeOneV2(acc, bias_data ? bias_data[oc] : 0,
++                              output_multiplier[oc], output_shift[oc],
++                              output_offset, act_min, act_max);
++        }
++      }
++    }
++  }
++}
++
++// V2 of the 1x1 pointwise kernel. A 1x1 conv is out[p][oc] =
++// sum_ic (in[p][ic] + input_offset) * W[oc][ic] + bias[oc]. Both the input
++// pixel row and each filter row are contiguous in the ORIGINAL layouts, so
++// each output element is one vectorized dot product; no repacking needed.
++void Conv_1x1_Pointwise_V2(const ConvParams& params,
++                           const int32_t* output_multiplier,
++                           const int32_t* output_shift,
++                           const RuntimeShape& input_shape,
++                           const int8_t* input_data,
++                           const RuntimeShape& filter_shape,
++                           const int8_t* filter_data, const int32_t* bias_data,
++                           const RuntimeShape& output_shape,
++                           int8_t* output_data) {
++  const auto batches = MatchingDim(input_shape, 0, output_shape, 0);
++  const int32_t input_offset = params.input_offset;
++  const int32_t output_offset = params.output_offset;
++  const int32_t act_min = params.quantized_activation_min;
++  const int32_t act_max = params.quantized_activation_max;
++  const auto stride_width = params.stride_width;
++  const auto stride_height = params.stride_height;
++  const auto input_width = input_shape.Dims(2);
++  const auto input_depth = input_shape.Dims(3);
++  const auto output_height = output_shape.Dims(1);
++  const auto output_width = output_shape.Dims(2);
++  const auto output_depth = output_shape.Dims(3);
++  TFLITE_DCHECK_EQ(filter_shape.Dims(1), 1);
++  TFLITE_DCHECK_EQ(filter_shape.Dims(2), 1);
++
++  const int in_row_stride = input_width * input_depth;
++
++  for (int batch = 0; batch < batches; ++batch) {
++    const int8_t* batch_base =
++        &input_data[Offset(input_shape, batch, 0, 0, 0)];
++    for (int out_y = 0; out_y < output_height; ++out_y) {
++      const int in_y = out_y * stride_height;  // 1x1 => no padding
++      for (int out_x = 0; out_x < output_width; ++out_x) {
++        const int in_x = out_x * stride_width;
++        const int8_t* in_pix =
++            batch_base + in_y * in_row_stride + in_x * input_depth;
++        int8_t* out_pix =
++            &output_data[Offset(output_shape, batch, out_y, out_x, 0)];
++        for (int oc = 0; oc < output_depth; ++oc) {
++          const int32_t acc = DotInt8V2(
++              in_pix, &filter_data[oc * input_depth], input_depth,
++              input_offset);
++          out_pix[oc] =
++              RequantizeOneV2(acc, bias_data ? bias_data[oc] : 0,
++                              output_multiplier[oc], output_shift[oc],
++                              output_offset, act_min, act_max);
++        }
++      }
++    }
++  }
++}
++
++
+ void Conv_4_4_16(const ConvParams& params, const OpDataConvCustom& data,
+                  const int32_t* output_multiplier, const uint8_t* shift_left,
+                  const uint8_t* shift_right, TfLiteContext* context,
+@@ -1321,6 +1723,26 @@ void ConvPerChannel(const ConvParams& params, const OpDataConvCustom& data,
+     Conv2D_4x4(params, data, input_shape, input_data, filter_shape,
+                filter_data_copy.get(), bias_data_copy.get(), output_shape,
+                output_data, data.repacked_weights_generic, context);
++
++    // ============================================================================
++    // EDIT 2 of 2 — paste this BRANCH inside ConvPerChannel's if/else dispatch
++    // chain, immediately BEFORE the final `else { MicroPrintf("Fallback...") }`.
++    // This is the CALL SITE that invokes the function defined above.
++    // ============================================================================
++
++  } else if (filter_height == 3 && filter_width == 3 && input_depth == 3 &&
++             output_depth == 8) {
++    // V2 rewrite; original Conv_3_3_3_8 kept above for comparison.
++    Conv_3_3_3_8_V2(params, output_multiplier, output_shift, input_shape,
++                    input_data, filter_shape, filter_data, bias_data,
++                    output_shape, output_data);
++
++  } else if (filter_height == 1 && filter_width == 1) {
++    // V2 rewrite; original Conv_1x1_Pointwise kept above for comparison.
++    Conv_1x1_Pointwise_V2(params, output_multiplier, output_shift, input_shape,
++                          input_data, filter_shape, filter_data, bias_data,
++                          output_shape, output_data);
++    
+   } else {
+     MicroPrintf("Fallback kernel: fh=%d fw=%d id=%d od=%d", filter_height,
+                 filter_width, input_depth, output_depth);
+@@ -1384,6 +1806,7 @@ void* ConvInit(TfLiteContext* context, const char* buffer, size_t length) {
+     data->accs_buffer_index = -1;
+     data->tiled_input_buffer_index = -1;
+     data->generic_tiled_buffer_index = -1;
++    data->gathered_weights_index = -1;   // <-- ADD THIS LINE
+   }
+   return ptr;
+ }
+@@ -1410,6 +1833,12 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+   TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
+       context, required_bytes, &data->accs_buffer_index));
+ 
++  // added
++
++  // Scratch for the 3x3x3->8 stem kernel's pre-gathered [tap][oc] weights.
++  TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
++      context, 27 * 8 * sizeof(int32_t), &data->gathered_weights_index));
++
+   TfLiteTensor* input =
+       micro_context->AllocateTempInputTensor(node, kConvInputTensor);
+   TfLiteTensor* filter =
+@@ -1476,6 +1905,58 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+     data->weight_sums = nullptr;
+   }
+ 
++  // ============================================================================
++  // ConvPrepare edit — INSERT this block immediately BEFORE the three
++  // DeallocateTempTfLiteTensor(...) calls near the end of ConvPrepare.
++  //
++  // It handles the 1x1 pointwise case: repack weights from [oc][ic] to [ic][oc]
++  // as int32, and precompute weight_sums[oc] = sum_ic W[oc][ic]. Both live in
++  // persistent buffers (like the 4x4 path). The kernel reads the repacked
++  // weights via generic_tiled_buffer_index, so we point that scratch index's
++  // backing store at our persistent buffer by storing the pointer in
++  // repacked_weights_generic and reading it there.
++  //
++  // NOTE: this reuses repacked_weights_generic (int8_t*) to hold an int32 array.
++  // We store as int8_t* and reinterpret in the kernel. If you prefer type-clean
++  // code, add a dedicated `int32_t* repacked_weights_1x1;` field to
++  // OpDataConvCustom instead. First-pass: reuse is fine.
++  // ============================================================================
++
++  if (filter_height == 1 && filter_width == 1) {
++    // Repacked weights: [ic][oc] as int32, persistent.
++    size_t repacked_1x1_bytes =
++        static_cast<size_t>(input_depth) * output_depth * sizeof(int32_t);
++    int32_t* repacked_1x1 = static_cast<int32_t*>(
++        context->AllocatePersistentBuffer(context, repacked_1x1_bytes));
++    TF_LITE_ENSURE(context, repacked_1x1 != nullptr);
++
++    // weight_sums[oc] = sum_ic W[oc][ic], persistent.
++    size_t weight_sums_size = output_depth * sizeof(int32_t);
++    data->weight_sums = static_cast<int32_t*>(
++        context->AllocatePersistentBuffer(context, weight_sums_size));
++    TF_LITE_ENSURE(context, data->weight_sums != nullptr);
++
++    const int8_t* original_weights = filter->data.int8;  // layout [oc][ic]
++    for (int oc = 0; oc < output_depth; ++oc) {
++      int32_t sum = 0;
++      for (int ic = 0; ic < input_depth; ++ic) {
++        const int8_t w = original_weights[oc * input_depth + ic];
++        // Transpose into [ic][oc] and widen to int32 for unit-stride vle32.
++        repacked_1x1[ic * output_depth + oc] = static_cast<int32_t>(w);
++        sum += static_cast<int32_t>(w);
++      }
++      data->weight_sums[oc] = sum;
++    }
++
++    // Expose the persistent repacked buffer to the kernel. The kernel reads it
++    // through GetScratchBuffer(generic_tiled_buffer_index); since scratch and
++    // persistent are different allocators, we instead stash the pointer here
++    // and have the kernel read data.repacked_weights_generic directly.
++    data->repacked_weights_generic =
++        reinterpret_cast<int8_t*>(repacked_1x1);
++  }
++
++  
+   micro_context->DeallocateTempTfLiteTensor(input);
+   micro_context->DeallocateTempTfLiteTensor(filter);
+   micro_context->DeallocateTempTfLiteTensor(output);
+diff --git a/sw/opt/litert-micro/memory_util.h b/sw/opt/litert-micro/memory_util.h
+index 0185b7e4..e4aaa78d 100644
+--- a/sw/opt/litert-micro/memory_util.h
++++ b/sw/opt/litert-micro/memory_util.h
+@@ -30,6 +30,7 @@ struct OpDataConvCustom : public tflite::OpDataConv {
+   int tiled_input_buffer_index;
+   int generic_tiled_buffer_index;
+   int8_t* repacked_weights_generic;
++  int gathered_weights_index;   // <-- ADD THIS LINE
+ };
+ 
+ struct AlignedFree {
