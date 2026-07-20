@@ -35,11 +35,19 @@ the reference cat image are carried here.
 
 ## Reproduce
 
-Prerequisites (same as upstream coralnpu): Bazel 7.4.1, Python 3.9-3.12,
-SRecord. Image regeneration additionally needs `numpy`, `pillow`, and network
-access to the public one-image-per-class ImageNet mirror.
+Prerequisites: Bazel 7.4.1 (via `bazelisk`, which reads `.bazelversion`) and
+SRecord — see upstream coralnpu
+[System Requirements](https://github.com/google-coral/coralnpu#system-requirements).
+Image regeneration needs `numpy` + `pillow` and network access:
+`pip install numpy pillow`.
+
+Run every command below from **this** repo's root (a fresh checkout each time —
+`apply.sh` expects an unpatched coralnpu):
 
 ```bash
+# 0. Get this repo.
+git clone <this-repo-url> && cd coralnpu-mobilenet-kernels
+
 # 1. Get upstream at the exact pinned commit.
 git clone https://github.com/google-coral/coralnpu.git
 git -C coralnpu checkout "$(cat BASE_COMMIT)"
@@ -48,17 +56,16 @@ git -C coralnpu checkout "$(cat BASE_COMMIT)"
 ./apply.sh coralnpu
 
 # 3. Build and run the kernel verification.
-cd coralnpu
-bazel run //tests/npusim_examples:npusim_verify_val10
+(cd coralnpu && bazel run //tests/npusim_examples:npusim_verify_val10)
 ```
 
-`apply.sh` checks the patches apply cleanly, copies the overlay files in, and
-runs `prepare_val_images.py --seed 42 --count 10`. If you are offline or lack
-`numpy`/`pillow`, generate the images manually before step 3:
+If you are offline or lack `numpy`/`pillow`, generate the images manually
+before step 3: `python3 coralnpu/tests/npusim_examples/prepare_val_images.py
+--seed 42 --count 10`.
 
-```bash
-python3 tests/npusim_examples/prepare_val_images.py --seed 42 --count 10
-```
+**Time:** step 3's first run fetches Bazel deps (MPACT simulator, tflite_micro)
+over the network, then simulates 10 images at ~136M cycles each — budget
+~30-40 min total.
 
 ## Expected result
 
