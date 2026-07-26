@@ -1,8 +1,45 @@
+diff --git a/sw/opt/litert-micro/accumulator_util.h b/sw/opt/litert-micro/accumulator_util.h
+index 9aaeda70..150c7c2a 100644
+--- a/sw/opt/litert-micro/accumulator_util.h
++++ b/sw/opt/litert-micro/accumulator_util.h
+@@ -30,23 +30,15 @@
+ namespace coralnpu_v2::opt::litert_micro {
+ inline void PrepareShiftParams(uint8_t* left, uint8_t* right,
+                                const int32_t* shift_in, int out_d) {
+-  int out_ch = 0;
+-  size_t out_ch_rem = out_d;
+-  while (out_ch_rem > 0) {
+-    const size_t vl = __riscv_vsetvl_e32m8(out_ch_rem);
+-    const vint32m8_t shift32 = __riscv_vle32_v_i32m8(&shift_in[out_ch], vl);
+-    const vint16m4_t shift16 = __riscv_vncvt_x_x_w_i16m4(shift32, vl);
+-    const vint8m2_t shift8 = __riscv_vncvt_x_x_w_i8m2(shift16, vl);
+-    const vint8m2_t neg = __riscv_vneg_v_i8m2(shift8, vl);
+-    // Positive values shift to LEFT, negative shift to right.
+-    const vuint8m2_t shl =
+-        __riscv_vreinterpret_v_i8m2_u8m2(__riscv_vmax_vx_i8m2(shift8, 0, vl));
+-    const vuint8m2_t shr =
+-        __riscv_vreinterpret_v_i8m2_u8m2(__riscv_vmax_vx_i8m2(neg, 0, vl));
+-    __riscv_vse8_v_u8m2(&left[out_ch], shl, vl);
+-    __riscv_vse8_v_u8m2(&right[out_ch], shr, vl);
+-    out_ch += vl;
+-    out_ch_rem -= vl;
++  // Setup-time (once per node), so compute scalarly for correctness. The prior
++  // vectorized version narrowed int32->int16->int8 with an LMUL=8 vncvt chain
++  // that corrupted the low half of the register group at VLMAX, producing a
++  // wrong (zero) right-shift for the first lanes on large output_depth layers
++  // (e.g. the 1000-class classifier). Positive shift => left, negative => right.
++  for (int i = 0; i < out_d; ++i) {
++    const int32_t s = shift_in[i];
++    left[i] = static_cast<uint8_t>(s > 0 ? s : 0);
++    right[i] = static_cast<uint8_t>(s < 0 ? -s : 0);
+   }
+ }
+ 
 diff --git a/sw/opt/litert-micro/conv.cc b/sw/opt/litert-micro/conv.cc
-index b24a2a55..3d0ac2aa 100644
+index b24a2a55..5680c1a1 100644
 --- a/sw/opt/litert-micro/conv.cc
 +++ b/sw/opt/litert-micro/conv.cc
-@@ -112,6 +112,123 @@ const int8_t* PadInput(int8_t* dst_buffer, const int8_t* val_ptr,
+@@ -112,6 +112,129 @@ const int8_t* PadInput(int8_t* dst_buffer, const int8_t* val_ptr,
    return buffer_start + pad_bytes;
  }
  
@@ -45,8 +82,6 @@ index b24a2a55..3d0ac2aa 100644
 +  const auto output_depth = output_shape.Dims(3);
 +  TFLITE_DCHECK_EQ(output_depth, 8);
 +
-+  const size_t vl = __riscv_vsetvl_e32m1(output_depth);
-+
 +  const int row_stride = input_width * input_depth;
 +  const int col_stride = input_depth;
 +
@@ -86,31 +121,39 @@ index b24a2a55..3d0ac2aa 100644
 +      const int in_y_origin = (out_y * stride_height) - pad_height;
 +      for (int out_x = 0; out_x < output_width; ++out_x) {
 +        const int in_x_origin = (out_x * stride_width) - pad_width;
++        int32_t* out_acc =
++            &accs_buf[Offset(output_shape, batch, out_y, out_x, 0)];
 +
-+        vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vl);
++        // Tile the output-channel axis: a single e32m1 vector may hold fewer
++        // than output_depth lanes (only 4 at VLEN=128), so loop until all
++        // output channels are covered instead of assuming one vector fits 8.
++        for (int oc0 = 0; oc0 < output_depth;) {
++          const size_t vl = __riscv_vsetvl_e32m1(output_depth - oc0);
++          vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vl);
 +
-+        for (int ky = 0; ky < 3; ++ky) {
-+          const int in_y = in_y_origin + ky;
-+          if (in_y < 0 || in_y >= input_height) continue;
-+          for (int kx = 0; kx < 3; ++kx) {
-+            const int in_x = in_x_origin + kx;
-+            if (in_x < 0 || in_x >= input_width) continue;
-+            const int8_t* in_pix =
-+                batch_base_ptr + in_y * row_stride + in_x * col_stride;
-+            for (int kc = 0; kc < 3; ++kc) {
-+              const int32_t in_val =
-+                  static_cast<int32_t>(in_pix[kc]) + input_offset;
-+              const int tap = ky * (filter_width * input_depth) +
-+                              kx * input_depth + kc;
-+              const vint32m1_t fil_vec =
-+                  __riscv_vle32_v_i32m1(&fil_oc[tap * output_depth], vl);
-+              acc = __riscv_vmacc_vx_i32m1(acc, in_val, fil_vec, vl);
++          for (int ky = 0; ky < 3; ++ky) {
++            const int in_y = in_y_origin + ky;
++            if (in_y < 0 || in_y >= input_height) continue;
++            for (int kx = 0; kx < 3; ++kx) {
++              const int in_x = in_x_origin + kx;
++              if (in_x < 0 || in_x >= input_width) continue;
++              const int8_t* in_pix =
++                  batch_base_ptr + in_y * row_stride + in_x * col_stride;
++              for (int kc = 0; kc < 3; ++kc) {
++                const int32_t in_val =
++                    static_cast<int32_t>(in_pix[kc]) + input_offset;
++                const int tap = ky * (filter_width * input_depth) +
++                                kx * input_depth + kc;
++                const vint32m1_t fil_vec = __riscv_vle32_v_i32m1(
++                    &fil_oc[tap * output_depth + oc0], vl);
++                acc = __riscv_vmacc_vx_i32m1(acc, in_val, fil_vec, vl);
++              }
 +            }
 +          }
-+        }
 +
-+        __riscv_vse32_v_i32m1(
-+            &accs_buf[Offset(output_shape, batch, out_y, out_x, 0)], acc, vl);
++          __riscv_vse32_v_i32m1(&out_acc[oc0], acc, vl);
++          oc0 += vl;
++        }
 +      }
 +    }
 +  }
@@ -126,7 +169,7 @@ index b24a2a55..3d0ac2aa 100644
  // Specialized 4x4 Conv2D kernel with LMUL=4 for high channel counts (up to 64).
  void Conv2D_4x4(const tflite::ConvParams& params,
                  const coralnpu_v2::opt::litert_micro::OpDataConvCustom& data,
-@@ -928,6 +1045,291 @@ void Conv_4_4_48_Stride1(
+@@ -928,6 +1051,290 @@ void Conv_4_4_48_Stride1(
                   batches * output_height * output_width, output_depth);
  }
  
@@ -202,26 +245,25 @@ index b24a2a55..3d0ac2aa 100644
 +        int32_t* out_acc =
 +            &accs_buf[Offset(output_shape, batch, out_y, out_x, 0)];
 +
-+        // Tile the od axis into vl-sized chunks.
++        // Tile the od axis into vl-sized chunks (up to 32 lanes at e32m8),
++        // broadcasting each scalar input across the od lanes. e32m8 covers 8x
++        // more output channels per instruction than e32m1 (only 4 lanes at
++        // VLEN=128), slashing loop overhead in this overhead-bound kernel.
 +        for (int oc0 = 0; oc0 < output_depth;) {
-+          const size_t vl = __riscv_vsetvl_e32m1(output_depth - oc0);
-+
-+          // Seed with zero-point term: input_offset * weight_sums[oc].
-+          //vint32m1_t acc = __riscv_vle32_v_i32m1(&weight_sums[oc0], vl);
-+	  vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vl);
-+          //acc = __riscv_vmul_vx_i32m1(acc, input_offset, vl);
++          const size_t vl = __riscv_vsetvl_e32m8(output_depth - oc0);
++          vint32m8_t acc = __riscv_vmv_v_x_i32m8(0, vl);
 +
 +          // Stream input channels; broadcast-MAC into the od lanes.
 +          for (int ic = 0; ic < input_depth; ++ic) {
-+            // const int32_t in_val = static_cast<int32_t>(in_pix[ic]);
-+	    const int32_t in_val = static_cast<int32_t>(in_pix[ic]) + input_offset;   // <-- offset here now
++            const int32_t in_val =
++                static_cast<int32_t>(in_pix[ic]) + input_offset;
 +            // Row ic of the [ic][od] repacked weights, offset to this od tile.
-+            const vint32m1_t w =
-+                __riscv_vle32_v_i32m1(&W_icod[ic * output_depth + oc0], vl);
-+            acc = __riscv_vmacc_vx_i32m1(acc, in_val, w, vl);
++            const vint32m8_t w =
++                __riscv_vle32_v_i32m8(&W_icod[ic * output_depth + oc0], vl);
++            acc = __riscv_vmacc_vx_i32m8(acc, in_val, w, vl);
 +          }
 +
-+          __riscv_vse32_v_i32m1(&out_acc[oc0], acc, vl);
++          __riscv_vse32_v_i32m8(&out_acc[oc0], acc, vl);
 +          oc0 += vl;
 +        }
 +      }
@@ -418,7 +460,7 @@ index b24a2a55..3d0ac2aa 100644
  void Conv_4_4_16(const ConvParams& params, const OpDataConvCustom& data,
                   const int32_t* output_multiplier, const uint8_t* shift_left,
                   const uint8_t* shift_right, TfLiteContext* context,
-@@ -1321,6 +1723,26 @@ void ConvPerChannel(const ConvParams& params, const OpDataConvCustom& data,
+@@ -1321,6 +1728,26 @@ void ConvPerChannel(const ConvParams& params, const OpDataConvCustom& data,
      Conv2D_4x4(params, data, input_shape, input_data, filter_shape,
                 filter_data_copy.get(), bias_data_copy.get(), output_shape,
                 output_data, data.repacked_weights_generic, context);
@@ -431,21 +473,21 @@ index b24a2a55..3d0ac2aa 100644
 +
 +  } else if (filter_height == 3 && filter_width == 3 && input_depth == 3 &&
 +             output_depth == 8) {
-+    // V2 rewrite; original Conv_3_3_3_8 kept above for comparison.
-+    Conv_3_3_3_8_V2(params, output_multiplier, output_shift, input_shape,
-+                    input_data, filter_shape, filter_data, bias_data,
-+                    output_shape, output_data);
++    Conv_3_3_3_8(params, data, output_multiplier, shift_left.get(),
++                 shift_right.get(), context, input_shape, input_data,
++                 filter_shape, filter_data_copy.get(), bias_shape,
++                 bias_data_copy.get(), output_shape, output_data);
 +
 +  } else if (filter_height == 1 && filter_width == 1) {
-+    // V2 rewrite; original Conv_1x1_Pointwise kept above for comparison.
-+    Conv_1x1_Pointwise_V2(params, output_multiplier, output_shift, input_shape,
-+                          input_data, filter_shape, filter_data, bias_data,
-+                          output_shape, output_data);
-+    
++    Conv_1x1_Pointwise(params, data, output_multiplier, shift_left.get(),
++                       shift_right.get(), context, input_shape, input_data,
++                       filter_shape, filter_data_copy.get(), bias_shape,
++                       bias_data_copy.get(), output_shape, output_data);
++
    } else {
      MicroPrintf("Fallback kernel: fh=%d fw=%d id=%d od=%d", filter_height,
                  filter_width, input_depth, output_depth);
-@@ -1384,6 +1806,7 @@ void* ConvInit(TfLiteContext* context, const char* buffer, size_t length) {
+@@ -1384,6 +1811,7 @@ void* ConvInit(TfLiteContext* context, const char* buffer, size_t length) {
      data->accs_buffer_index = -1;
      data->tiled_input_buffer_index = -1;
      data->generic_tiled_buffer_index = -1;
@@ -453,7 +495,7 @@ index b24a2a55..3d0ac2aa 100644
    }
    return ptr;
  }
-@@ -1410,6 +1833,12 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+@@ -1410,6 +1838,12 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
    TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
        context, required_bytes, &data->accs_buffer_index));
  
@@ -466,7 +508,7 @@ index b24a2a55..3d0ac2aa 100644
    TfLiteTensor* input =
        micro_context->AllocateTempInputTensor(node, kConvInputTensor);
    TfLiteTensor* filter =
-@@ -1476,6 +1905,58 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+@@ -1476,6 +1910,58 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
      data->weight_sums = nullptr;
    }
  

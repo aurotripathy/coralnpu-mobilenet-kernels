@@ -9,11 +9,17 @@ forking the whole repo.
 
 ## What this adds
 
-* **New conv kernels** (`patches/0001-add-v2-conv-kernels.patch`):
-  `Conv_3_3_3_8_V2` and `Conv_1x1_Pointwise_V2` in
-  `sw/opt/litert-micro/conv.cc`, plus the dispatch that routes the MobileNet
-  stem and pointwise shapes to them, and a one-field addition to
-  `sw/opt/litert-micro/memory_util.h`.
+* **Optimized conv kernels** (`patches/0001-add-v2-conv-kernels.patch`,
+  touching `conv.cc`, `accumulator_util.h`, and `memory_util.h`): vectorized
+  int8 kernels for the MobileNet stem (`Conv_3_3_3_8`, tiled over output
+  channels) and the pointwise 1x1 layers (`Conv_1x1_Pointwise`, a broadcast MAC
+  at `e32m8` covering 32 output channels per instruction), the dispatch that
+  routes those shapes to them, a scalar `PrepareShiftParams` (fixes a requant
+  corruption on the 1000-class classifier), and a one-field addition to
+  `memory_util.h`. This cuts CONV_2D from ~73.6M to ~20.1M cycles and the whole
+  model from ~136M to ~33M cycles per image, bit-exact against the scalar
+  reference. (The file also carries `*_V2` scalar variants as an unused
+  bit-reference used during bring-up.)
 * **npusim MobileNet examples** (`patches/0002-wire-npusim-examples.patch`
   plus `overlay/`): a real ImageNet-trained MobileNet V1 0.25 runner and a
   kernel verifier that runs the model over 10 random ImageNet validation
@@ -64,21 +70,23 @@ before step 3: `python3 coralnpu/tests/npusim_examples/prepare_val_images.py
 --seed 42 --count 10`.
 
 **Time:** step 3's first run fetches Bazel deps (MPACT simulator, tflite_micro)
-over the network, then simulates 10 images at ~136M cycles each — budget
-~30-40 min total.
+over the network, then simulates 10 images at ~33M cycles each — budget
+~15-25 min total (dominated by the one-time dep fetch and build).
 
 ## Expected result
 
 `--seed 42 --count 10` samples classes 25, 104, 114, 142, 228, 250, 281, 654,
 754, 759. The verifier passes at top-1 >= 4/10 and top-5 >= 6/10; a
-representative run scores 4/10 top-1 and 6/10 top-5 at ~136M cycles per image.
-A broken kernel collapses these to ~0, which is the failure signal. See
+representative run scores 4/10 top-1 and 6/10 top-5 at ~33M cycles per image
+(CONV_2D ~20.1M, ~75% of the total). A broken kernel collapses these to ~0,
+which is the failure signal. See
 `overlay/tests/npusim_examples/README.md` for the full flow and log-line
 reference.
 
 ## Applying to a different upstream commit
 
 The patches are pinned to `BASE_COMMIT`. On a newer coralnpu, `apply.sh` warns
-and `git apply --check` may fail if the upstream `conv.cc` / `memory_util.h`
-have diverged; in that case rebase the two patches in `patches/` by hand (the
-overlay files are net-new and copy in regardless).
+and `git apply --check` may fail if the upstream `conv.cc`,
+`accumulator_util.h`, or `memory_util.h` have diverged; in that case rebase the
+two patches in `patches/` by hand (the overlay files are net-new and copy in
+regardless).
