@@ -31,12 +31,12 @@ bazel run //tests/npusim_examples:npusim_verify_val10
 
 MobileNet V1 0.25 is a small (~50% top-1) network, so the test does not demand
 a perfect top-1 on every image. It passes when top-1 >= 4/10 and top-5 >= 6/10.
-The point is to exercise the optimized `Conv_*_V2` and depthwise kernels on
-varied real inputs: a broken kernel collapses these metrics to ~0 (bit-identical
+The point is to exercise the optimized conv and depthwise kernels on varied
+real inputs: a broken kernel collapses these metrics to ~0 (bit-identical
 garbage), whereas correct kernels produce sensible predictions and reasonable
 near-misses. A representative run scores 4/10 top-1 and 6/10 top-5 (e.g. exact
 hits on *European fire salamander*, *dowitcher*, *komondor*, *reflex camera*;
-*tabby* landing just behind *Egyptian cat*), at ~136M cycles per image.
+*tabby* landing just behind *Egyptian cat*), at ~33M cycles per image.
 
 ### Regenerating / resampling the images
 
@@ -72,6 +72,48 @@ whatever `val_*` files are present, so no `BUILD` edit is needed.
    and reads the class scores back from `inference_output`.
 3. Output scores are quantized softmax probabilities:
    `probability = (raw + 128) / 256`.
+
+## From .tflite to RISC-V ELF: how the model gets into the simulator
+
+The `.tflite` model is never converted or lowered into code. Its raw flatbuffer
+bytes are embedded as a C array inside the C++ runner, and that program is
+cross-compiled to a RISC-V ELF. The whole pipeline lives in this folder's
+`BUILD` file:
+
+```
+models/*.tflite --(generate_cc_arrays)--> model .cc/.h (const unsigned char[])
+                                              |
+run_full_mobilenet_v1_real.cc  +  model array | --(coralnpu_v2_binary)--> .elf
+                                              |
+npusim_run_*.py --(load_program(.elf))--> simulator executes it
+```
+
+Stage by stage:
+
+1. **`.tflite` -> C array** (`generate_cc_arrays` targets in `BUILD`). This is
+   a genrule (defined in `rules/utils.bzl`) that runs TFLite Micro's
+   `//tensorflow/lite/micro/tools:generate_cc_arrays` tool. It dumps the
+   flatbuffer bytes into a `const unsigned char g_..._data[]` plus a length
+   constant, emitted as `mobilenet_v1_025_224_int8_real.cc/.h` and wrapped in
+   the `mobilenet_v1_025_224_int8_real_lib` cc_library. The model stays a
+   flatbuffer; at runtime TFLM's `MicroInterpreter` parses and walks it in
+   place (`tflite::GetModel(g_..._data)`), so there is no ahead-of-time
+   compilation of the graph.
+2. **C++ + model array -> ELF** (`coralnpu_v2_binary` target in `BUILD`,
+   rule in `rules/coralnpu_v2.bzl`). `run_full_mobilenet_v1_real.cc` includes
+   the generated header and hands the array to the interpreter. The rule
+   cross-compiles it with the CoralNPU RISC-V toolchain, links against the
+   optimized kernels (`//sw/opt/litert-micro:conv`, `:depthwise_conv`) and the
+   TFLM framework, using a generated linker script sized by
+   `itcm_size_kbytes` / `dtcm_size_kbytes` (1024 KB each here, the "highmem"
+   layout), and emits `run_full_mobilenet_v1_real_binary.elf` (plus an
+   `objcopy`'d `.bin`).
+3. **ELF -> simulator.** The Python drivers resolve the ELF from runfiles and
+   call `npu_sim.load_program(elf)`; the simulator maps the ELF's `PT_LOAD`
+   segments into memory (see the log-line section below) and runs it.
+
+So the only true model "conversion" happens back at quantization time (see
+`make_models/README.md`); from there on the model is data, not code.
 
 ## Adding a test case for a new real image
 
@@ -157,13 +199,13 @@ softmax resolution is 1/256 (~0.4%).
   option of `generate_cc_arrays` in `rules/utils.bzl`) or growing
   `itcm_size_kbytes` in `BUILD`.
 * **Conv kernels:** the dispatch in `sw/opt/litert-micro/conv.cc` routes the
-  stem (3x3x3->8) and 1x1 pointwise shapes to the `_V2` kernels
-  (`Conv_3_3_3_8_V2`, `Conv_1x1_Pointwise_V2`). The original optimized
-  kernels (`Conv_3_3_3_8`, `Conv_1x1_Pointwise`) are kept for comparison but
-  are known to misclassify on real ImageNet weights (wide per-channel
-  quantization ranges); see the note in `run_full_mobilenet_v1_real.cc`.
-* **Expected result for the cat image:** top-1 "tabby" (raw -60, ~27%), with
-  Egyptian cat / tiger cat tied and lynx close behind, in ~136M cycles.
+  stem (3x3x3->8) to `Conv_3_3_3_8` (vectorized, tiled over output channels)
+  and the 1x1 pointwise shapes to `Conv_1x1_Pointwise` (broadcast MAC at
+  `e32m8`, 32 output channels per instruction). Both are bit-exact against the
+  scalar `_V2` reference kernels, which remain in the file as an unused
+  bit-reference from bring-up.
+* **Expected result for the cat image:** top-1 "tabby" (raw -61, ~26%), with
+  Egyptian cat / tiger cat close behind, in ~33M cycles.
 
 ## Understanding the simulator log lines
 
