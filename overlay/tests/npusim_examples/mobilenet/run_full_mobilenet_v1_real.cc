@@ -22,14 +22,67 @@
 #include "sw/opt/litert-micro/conv.h"
 #include "sw/opt/litert-micro/depthwise_conv.h"
 #include "sw/opt/rvv_opt.h"
+#include "sw/utils/utils.h"
 #include "tensorflow/lite/core/c/common.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/micro_profiler_interface.h"
 #include "tensorflow/lite/micro/system_setup.h"
-#include "tests/npusim_examples/mobilenet_v1_025_224_int8_real.h"
+#include "tests/npusim_examples/mobilenet/mobilenet_v1_025_224_int8_real.h"
 
 namespace {
 using MobilenetOpResolver = tflite::MicroMutableOpResolver<10>;
+
+// Per-node cycle profiler backed by the mcycle CSR (modeled by npusim).
+// The interpreter calls BeginEvent/EndEvent around every op invocation with
+// the op name as tag (available because TF_LITE_STRIP_ERROR_STRINGS is not
+// set in the default build config).
+class CycleProfiler : public tflite::MicroProfilerInterface {
+ public:
+  uint32_t BeginEvent(const char* tag) override {
+    if (count_ >= kMaxEvents) return kMaxEvents - 1;
+    tags_[count_] = tag;
+    starts_[count_] = mcycle_read();
+    return count_++;
+  }
+  void EndEvent(uint32_t handle) override {
+    cycles_[handle] = static_cast<uint32_t>(mcycle_read() - starts_[handle]);
+  }
+  void PrintSummary() const {
+    printf("== per-node cycles ==\n");
+    uint32_t total = 0;
+    for (int i = 0; i < count_; ++i) {
+      printf("node %2d %-20s %lu\n", i, tags_[i] ? tags_[i] : "?",
+             static_cast<unsigned long>(cycles_[i]));
+      total += cycles_[i];
+    }
+    printf("== per-op totals ==\n");
+    bool done[kMaxEvents] = {};
+    for (int i = 0; i < count_; ++i) {
+      if (done[i] || !tags_[i]) continue;
+      uint32_t sum = 0;
+      int n = 0;
+      for (int j = i; j < count_; ++j) {
+        if (!done[j] && tags_[j] && strcmp(tags_[i], tags_[j]) == 0) {
+          sum += cycles_[j];
+          n += 1;
+          done[j] = true;
+        }
+      }
+      printf("op %-20s x%2d %10lu cycles (%lu%%)\n", tags_[i], n,
+             static_cast<unsigned long>(sum),
+             static_cast<unsigned long>(total ? (sum / (total / 100)) : 0));
+    }
+    printf("total profiled cycles %lu\n", static_cast<unsigned long>(total));
+  }
+
+ private:
+  static constexpr int kMaxEvents = 64;
+  const char* tags_[kMaxEvents] = {};
+  uint64_t starts_[kMaxEvents] = {};
+  uint32_t cycles_[kMaxEvents] = {};
+  int count_ = 0;
+};
 using coralnpu_v2::opt::litert_micro::Register_CONV_2D;
 using coralnpu_v2::opt::litert_micro::Register_DEPTHWISE_CONV_2D;
 TfLiteStatus RegisterOps(MobilenetOpResolver& op_resolver) {
@@ -75,8 +128,11 @@ int main(int argc, char** argv) {
   MobilenetOpResolver op_resolver;
   RegisterOps(op_resolver);
   printf("Halted after op resolver\n");
+  static CycleProfiler profiler;
   tflite::MicroInterpreter interpreter(model, op_resolver, tensor_arena,
-                                       kTensorArenaSize);
+                                       kTensorArenaSize,
+                                       /*resource_variables=*/nullptr,
+                                       &profiler);
   printf("Halted after Interpreter setup\n");
   if (interpreter.AllocateTensors() != kTfLiteOk) {
     printf("Error during AllocateTensors\n");
@@ -104,6 +160,7 @@ int main(int argc, char** argv) {
     return -1;
   }
   coralnpu_v2::opt::Memcpy(inference_output, output->data.data, kNumClasses);
+  profiler.PrintSummary();
   printf("Invoke successful\n");
   inference_status = 0;
   return 0;

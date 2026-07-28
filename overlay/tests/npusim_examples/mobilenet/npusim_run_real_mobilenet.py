@@ -72,11 +72,11 @@ def run_real_mobilenet():
     npu_sim = CoralNPUV2Simulator(highmem_ld=True, exit_on_ebreak=True)
     r = runfiles.Create()
     elf_file = r.Rlocation(
-        'coralnpu_hw/tests/npusim_examples/run_full_mobilenet_v1_real_binary.elf')
+        'coralnpu_hw/tests/npusim_examples/mobilenet/run_full_mobilenet_v1_real_binary.elf')
     image_file = r.Rlocation(
-        'coralnpu_hw/tests/npusim_examples/images/cat_224x224_real.npy')
+        'coralnpu_hw/tests/npusim_examples/mobilenet/images/cat_224x224_real.npy')
     labels_file = r.Rlocation(
-        'coralnpu_hw/tests/npusim_examples/labels/imagenet_labels.txt')
+        'coralnpu_hw/tests/npusim_examples/mobilenet/labels/imagenet_labels.txt')
 
     entry_point, symbol_map = npu_sim.get_elf_entry_and_symbol(
         elf_file, ['inference_status', 'inference_input', 'inference_output'])

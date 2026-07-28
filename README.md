@@ -62,11 +62,11 @@ git -C coralnpu checkout "$(cat BASE_COMMIT)"
 ./apply.sh coralnpu
 
 # 3. Build and run the kernel verification.
-(cd coralnpu && bazel run //tests/npusim_examples:npusim_verify_val10)
+(cd coralnpu && bazel run //tests/npusim_examples/mobilenet:npusim_verify_val10)
 ```
 
 If you are offline or lack `numpy`/`pillow`, generate the images manually
-before step 3: `python3 coralnpu/tests/npusim_examples/prepare_val_images.py
+before step 3: `python3 coralnpu/tests/npusim_examples/mobilenet/prepare_val_images.py
 --seed 42 --count 10`.
 
 **Time:** step 3's first run fetches Bazel deps (MPACT simulator, tflite_micro)
@@ -80,8 +80,8 @@ over the network, then simulates 10 images at ~33M cycles each — budget
 representative run scores 4/10 top-1 and 6/10 top-5 at ~33M cycles per image
 (CONV_2D ~20.1M, ~75% of the total). A broken kernel collapses these to ~0,
 which is the failure signal. See
-`overlay/tests/npusim_examples/README.md` for the full flow and log-line
-reference.
+`overlay/tests/npusim_examples/mobilenet/README.md` for the full flow and
+log-line reference.
 
 ## Applying to a different upstream commit
 

@@ -28,12 +28,12 @@ which lines up with ``labels/imagenet_labels.txt`` (after its leading
 This is a host-side helper, not a Bazel target; it needs ``numpy`` and
 ``pillow`` and network access. Run it from anywhere:
 
-    python3 tests/npusim_examples/prepare_val_images.py --seed 42 --count 10
+    python3 tests/npusim_examples/mobilenet/prepare_val_images.py --seed 42 --count 10
 
 Then rebuild/run the verifier (the ``glob`` in BUILD picks up new ``val_*``
 files automatically):
 
-    bazel run //tests/npusim_examples:npusim_verify_val10
+    bazel run //tests/npusim_examples/mobilenet:npusim_verify_val10
 """
 
 import argparse

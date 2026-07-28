@@ -47,12 +47,12 @@ cp -rv "$HERE/overlay/." "$CORALNPU/" >/dev/null
 echo "   done."
 
 echo ">> Regenerating the 10 validation images (needs numpy, pillow, network)..."
-if python3 "$CORALNPU/tests/npusim_examples/prepare_val_images.py" --seed 42 --count 10; then
+if python3 "$CORALNPU/tests/npusim_examples/mobilenet/prepare_val_images.py" --seed 42 --count 10; then
   echo "   images regenerated."
 else
   echo "WARNING: image generation failed (offline or missing numpy/pillow)." >&2
   echo "         Run it manually before the verify step:" >&2
-  echo "           python3 tests/npusim_examples/prepare_val_images.py --seed 42 --count 10" >&2
+  echo "           python3 tests/npusim_examples/mobilenet/prepare_val_images.py --seed 42 --count 10" >&2
 fi
 
 cat <<EOF
@@ -60,6 +60,6 @@ cat <<EOF
 Done. Now build and run the kernel verification from the coralnpu root:
 
   cd "$CORALNPU"
-  bazel run //tests/npusim_examples:npusim_verify_val10
+  bazel run //tests/npusim_examples/mobilenet:npusim_verify_val10
 
 EOF

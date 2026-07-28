@@ -1,19 +1,118 @@
+diff --git a/doc/tutorials/npusim_mobilenet_tutorial.md b/doc/tutorials/npusim_mobilenet_tutorial.md
+index 246b306b..06cdacaf 100644
+--- a/doc/tutorials/npusim_mobilenet_tutorial.md
++++ b/doc/tutorials/npusim_mobilenet_tutorial.md
+@@ -45,7 +45,7 @@ The Python script uses `CoralNPUV2Simulator` to launch the ELF binary and intera
+ ```python
+ npu_sim = CoralNPUV2Simulator(highmem_ld=True, exit_on_ebreak=True)
+ r = runfiles.Create()
+-elf_file = r.Rlocation('coralnpu_hw/tests/npusim_examples/run_full_mobilenet_v1_binary.elf')
++elf_file = r.Rlocation('coralnpu_hw/tests/npusim_examples/mobilenet/run_full_mobilenet_v1_binary.elf')
+ ```
+ The script uses Bazel's `runfiles` utility to locate the compiled `.elf` binary regardless of the host environment.
+ 
+@@ -86,7 +86,7 @@ Finally, `npu_sim.read_memory` is used to check the final `inference_status` val
+ ## How to Run
+ To run the simulation with the updated Python script, run the Bazel target from the repository root:
+ ```bash
+-bazel run tests/npusim_examples:npusim_run_mobilenet
++bazel run tests/npusim_examples/mobilenet:npusim_run_mobilenet
+ ```
+ 
+ ## Summary of the Plumbing Flow
 diff --git a/tests/npusim_examples/BUILD b/tests/npusim_examples/BUILD
-index 43011e07..d02454b7 100644
+deleted file mode 100644
+index 43011e07..00000000
 --- a/tests/npusim_examples/BUILD
-+++ b/tests/npusim_examples/BUILD
-@@ -14,6 +14,7 @@
- 
- load("@coralnpu_hw//third_party/python:requirements.bzl", "requirement")
- load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
++++ /dev/null
+@@ -1,50 +0,0 @@
+-# Copyright 2026 Google LLC
+-#
+-# Licensed under the Apache License, Version 2.0 (the "License");
+-# you may not use this file except in compliance with the License.
+-# You may obtain a copy of the License at
+-#
+-#     http://www.apache.org/licenses/LICENSE-2.0
+-#
+-# Unless required by applicable law or agreed to in writing, software
+-# distributed under the License is distributed on an "AS IS" BASIS,
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+-# See the License for the specific language governing permissions and
+-# limitations under the License.
+-
+-load("@coralnpu_hw//third_party/python:requirements.bzl", "requirement")
+-load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
+-
+-py_binary(
+-    name = "npusim_run_mobilenet",
+-    srcs = ["npusim_run_mobilenet.py"],
+-    data = [
+-        ":run_full_mobilenet_v1_binary",
+-    ],
+-    deps = [
+-        "//sw/coralnpu_sim:coralnpu_v2_sim_utils_lib",
+-        "@bazel_tools//tools/python/runfiles",
+-        requirement("numpy"),
+-    ],
+-)
+-
+-coralnpu_v2_binary(
+-    name = "run_full_mobilenet_v1_binary",
+-    srcs = [
+-        "run_full_mobilenet_v1.cc",
+-    ],
+-    dtcm_size_kbytes = 1024,  # Highmem
+-    itcm_size_kbytes = 1024,  # Highmem
+-    semihosting = True,
+-    visibility = ["//visibility:public"],
+-    deps = [
+-        "//sw/opt:rvv_opt",
+-        "//sw/opt/litert-micro:conv",
+-        "//sw/opt/litert-micro:depthwise_conv",
+-        "//tests/cocotb/tutorial/tfmicro:mobilenet_v1_025_224_int8_dummy_lib",
+-        "@tflite_micro//tensorflow/lite/micro:micro_framework",
+-        "@tflite_micro//tensorflow/lite/micro:micro_log",
+-        "@tflite_micro//tensorflow/lite/micro:op_resolvers",
+-        "@tflite_micro//tensorflow/lite/micro:system_setup",
+-    ],
+-)
+diff --git a/tests/npusim_examples/mobilenet/BUILD b/tests/npusim_examples/mobilenet/BUILD
+new file mode 100644
+index 00000000..fe986e43
+--- /dev/null
++++ b/tests/npusim_examples/mobilenet/BUILD
+@@ -0,0 +1,121 @@
++# Copyright 2026 Google LLC
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++# See the License for the specific language governing permissions and
++# limitations under the License.
++
++load("@coralnpu_hw//third_party/python:requirements.bzl", "requirement")
++load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
 +load("//rules:utils.bzl", "generate_cc_arrays")
- 
- py_binary(
-     name = "npusim_run_mobilenet",
-@@ -28,6 +29,75 @@ py_binary(
-     ],
- )
- 
++
++py_binary(
++    name = "npusim_run_mobilenet",
++    srcs = ["npusim_run_mobilenet.py"],
++    data = [
++        ":run_full_mobilenet_v1_binary",
++    ],
++    deps = [
++        "//sw/coralnpu_sim:coralnpu_v2_sim_utils_lib",
++        "@bazel_tools//tools/python/runfiles",
++        requirement("numpy"),
++    ],
++)
++
 +py_binary(
 +    name = "npusim_run_real_mobilenet",
 +    srcs = ["npusim_run_real_mobilenet.py"],
@@ -76,6 +175,7 @@ index 43011e07..d02454b7 100644
 +        "//sw/opt:rvv_opt",
 +        "//sw/opt/litert-micro:conv",
 +        "//sw/opt/litert-micro:depthwise_conv",
++        "//sw/utils:utils",
 +        "@tflite_micro//tensorflow/lite/micro:micro_framework",
 +        "@tflite_micro//tensorflow/lite/micro:micro_log",
 +        "@tflite_micro//tensorflow/lite/micro:op_resolvers",
@@ -83,14 +183,34 @@ index 43011e07..d02454b7 100644
 +    ],
 +)
 +
- coralnpu_v2_binary(
-     name = "run_full_mobilenet_v1_binary",
-     srcs = [
-diff --git a/tests/npusim_examples/npusim_run_mobilenet.py b/tests/npusim_examples/npusim_run_mobilenet.py
-index 7284e5ad..4d4e96f0 100644
++coralnpu_v2_binary(
++    name = "run_full_mobilenet_v1_binary",
++    srcs = [
++        "run_full_mobilenet_v1.cc",
++    ],
++    dtcm_size_kbytes = 1024,  # Highmem
++    itcm_size_kbytes = 1024,  # Highmem
++    semihosting = True,
++    visibility = ["//visibility:public"],
++    deps = [
++        "//sw/opt:rvv_opt",
++        "//sw/opt/litert-micro:conv",
++        "//sw/opt/litert-micro:depthwise_conv",
++        "//tests/cocotb/tutorial/tfmicro:mobilenet_v1_025_224_int8_dummy_lib",
++        "@tflite_micro//tensorflow/lite/micro:micro_framework",
++        "@tflite_micro//tensorflow/lite/micro:micro_log",
++        "@tflite_micro//tensorflow/lite/micro:op_resolvers",
++        "@tflite_micro//tensorflow/lite/micro:system_setup",
++    ],
++)
+diff --git a/tests/npusim_examples/npusim_run_mobilenet.py b/tests/npusim_examples/mobilenet/npusim_run_mobilenet.py
+similarity index 58%
+rename from tests/npusim_examples/npusim_run_mobilenet.py
+rename to tests/npusim_examples/mobilenet/npusim_run_mobilenet.py
+index 7284e5ad..48180ae6 100644
 --- a/tests/npusim_examples/npusim_run_mobilenet.py
-+++ b/tests/npusim_examples/npusim_run_mobilenet.py
-@@ -16,6 +16,40 @@ from bazel_tools.tools.python.runfiles import runfiles
++++ b/tests/npusim_examples/mobilenet/npusim_run_mobilenet.py
+@@ -16,17 +16,54 @@ from bazel_tools.tools.python.runfiles import runfiles
  from coralnpu_v2_sim_utils import CoralNPUV2Simulator
  import numpy as np
  
@@ -131,7 +251,11 @@ index 7284e5ad..4d4e96f0 100644
  def run_full_mobilenet():
      print(f"Running full mobilenet...")
      npu_sim = CoralNPUV2Simulator(highmem_ld=True, exit_on_ebreak=True)
-@@ -26,7 +60,10 @@ def run_full_mobilenet():
+     r = runfiles.Create()
+-    elf_file = r.Rlocation('coralnpu_hw/tests/npusim_examples/run_full_mobilenet_v1_binary.elf')
++    elf_file = r.Rlocation('coralnpu_hw/tests/npusim_examples/mobilenet/run_full_mobilenet_v1_binary.elf')
+ 
+     entry_point, symbol_map = npu_sim.get_elf_entry_and_symbol(elf_file, ['inference_status', 'inference_input', 'inference_output'])
      npu_sim.load_program(elf_file, entry_point)
  
      if symbol_map.get('inference_input'):
@@ -142,3 +266,7 @@ index 7284e5ad..4d4e96f0 100644
          npu_sim.write_memory(symbol_map['inference_input'], input_data)
  
      print("Running simulation...", flush=True)
+diff --git a/tests/npusim_examples/run_full_mobilenet_v1.cc b/tests/npusim_examples/mobilenet/run_full_mobilenet_v1.cc
+similarity index 100%
+rename from tests/npusim_examples/run_full_mobilenet_v1.cc
+rename to tests/npusim_examples/mobilenet/run_full_mobilenet_v1.cc

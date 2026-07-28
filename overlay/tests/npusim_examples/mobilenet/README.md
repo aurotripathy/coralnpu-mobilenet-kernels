@@ -12,7 +12,7 @@ This folder contains end-to-end examples that run MobileNet V1 (alpha 0.25,
 Run them from the repo root:
 
 ```bash
-bazel run //tests/npusim_examples:npusim_run_real_mobilenet
+bazel run //tests/npusim_examples/mobilenet:npusim_run_real_mobilenet
 ```
 
 ## Verifying the kernels on real validation images
@@ -26,7 +26,7 @@ each. The driver runs the model on every image and compares the top-1/top-5
 prediction against ground truth:
 
 ```bash
-bazel run //tests/npusim_examples:npusim_verify_val10
+bazel run //tests/npusim_examples/mobilenet:npusim_verify_val10
 ```
 
 MobileNet V1 0.25 is a small (~50% top-1) network, so the test does not demand
@@ -49,7 +49,7 @@ center-crops each to 224x224x3, and writes `images/val_<class>_<label>_224x224.n
 plus the manifest:
 
 ```bash
-python3 tests/npusim_examples/prepare_val_images.py --seed 42 --count 10
+python3 tests/npusim_examples/mobilenet/prepare_val_images.py --seed 42 --count 10
 ```
 
 The mirror lists files in synset order, so a file's position equals its
@@ -172,13 +172,13 @@ are resolved as:
 
 ```python
 image_file = r.Rlocation(
-    'coralnpu_hw/tests/npusim_examples/images/my_image_224x224.npy')
+    'coralnpu_hw/tests/npusim_examples/mobilenet/images/my_image_224x224.npy')
 ```
 
 ### 4. Run and interpret
 
 ```bash
-bazel run //tests/npusim_examples:npusim_run_real_mobilenet
+bazel run //tests/npusim_examples/mobilenet:npusim_run_real_mobilenet
 ```
 
 The driver prints the top-5 classes with their ImageNet label names (from

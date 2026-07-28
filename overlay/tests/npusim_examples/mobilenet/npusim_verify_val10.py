@@ -36,7 +36,7 @@ import numpy as np
 
 EXPECTED_SHAPE = (224, 224, 3)
 NUM_CLASSES = 1000  # ImageNet (ILSVRC-2012)
-PKG = 'coralnpu_hw/tests/npusim_examples'
+PKG = 'coralnpu_hw/tests/npusim_examples/mobilenet'
 
 # Pass thresholds (out of 10 images).
 MIN_TOP1 = 4
