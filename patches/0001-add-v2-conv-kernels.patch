@@ -36,10 +36,10 @@ index 9aaeda70..150c7c2a 100644
  }
  
 diff --git a/sw/opt/litert-micro/conv.cc b/sw/opt/litert-micro/conv.cc
-index b24a2a55..5680c1a1 100644
+index b24a2a55..ae2948a5 100644
 --- a/sw/opt/litert-micro/conv.cc
 +++ b/sw/opt/litert-micro/conv.cc
-@@ -112,6 +112,129 @@ const int8_t* PadInput(int8_t* dst_buffer, const int8_t* val_ptr,
+@@ -112,6 +112,169 @@ const int8_t* PadInput(int8_t* dst_buffer, const int8_t* val_ptr,
    return buffer_start + pad_bytes;
  }
  
@@ -107,6 +107,16 @@ index b24a2a55..5680c1a1 100644
 +    }
 +  }
 +
++  // tapsum[oc] = sum over all 27 taps of W[oc][tap], stored just past the
++  // gathered weights. Lets the fully-in-bounds case seed the accumulator with
++  // input_offset * tapsum[oc] instead of adding input_offset to all 27 inputs.
++  int32_t* tapsum = fil_oc + kTaps * output_depth;
++  for (int oc = 0; oc < output_depth; ++oc) {
++    int32_t sum = 0;
++    for (int tap = 0; tap < kTaps; ++tap) sum += fil_oc[tap * output_depth + oc];
++    tapsum[oc] = sum;
++  }
++
 +  int32_t* accs_buf = static_cast<int32_t*>(
 +      context->GetScratchBuffer(context, data.accs_buffer_index));
 +  TFLITE_DCHECK_NE(accs_buf, nullptr);
@@ -124,34 +134,64 @@ index b24a2a55..5680c1a1 100644
 +        int32_t* out_acc =
 +            &accs_buf[Offset(output_shape, batch, out_y, out_x, 0)];
 +
-+        // Tile the output-channel axis: a single e32m1 vector may hold fewer
-+        // than output_depth lanes (only 4 at VLEN=128), so loop until all
-+        // output channels are covered instead of assuming one vector fits 8.
-+        for (int oc0 = 0; oc0 < output_depth;) {
-+          const size_t vl = __riscv_vsetvl_e32m1(output_depth - oc0);
-+          vint32m1_t acc = __riscv_vmv_v_x_i32m1(0, vl);
++        // Tile the output-channel axis. e32m2 holds 8 int32 lanes at VLEN=128,
++        // which covers this kernel's 8 output channels in a single tile (e32m1
++        // fits only 4, forcing two passes over the 27 taps). The loop is kept
++        // for generality rather than assuming one vector always fits.
++        // Whether the whole 3x3 window is in bounds. When it is, every tap
++        // contributes and no bounds check can fire, so the zero-point term
++        // collapses to the constant input_offset * tapsum[oc].
++        const bool interior = in_y_origin >= 0 &&
++                              in_y_origin + 2 < input_height &&
++                              in_x_origin >= 0 && in_x_origin + 2 < input_width;
 +
-+          for (int ky = 0; ky < 3; ++ky) {
-+            const int in_y = in_y_origin + ky;
-+            if (in_y < 0 || in_y >= input_height) continue;
-+            for (int kx = 0; kx < 3; ++kx) {
-+              const int in_x = in_x_origin + kx;
-+              if (in_x < 0 || in_x >= input_width) continue;
-+              const int8_t* in_pix =
-+                  batch_base_ptr + in_y * row_stride + in_x * col_stride;
-+              for (int kc = 0; kc < 3; ++kc) {
-+                const int32_t in_val =
-+                    static_cast<int32_t>(in_pix[kc]) + input_offset;
-+                const int tap = ky * (filter_width * input_depth) +
-+                                kx * input_depth + kc;
-+                const vint32m1_t fil_vec = __riscv_vle32_v_i32m1(
-+                    &fil_oc[tap * output_depth + oc0], vl);
-+                acc = __riscv_vmacc_vx_i32m1(acc, in_val, fil_vec, vl);
++        for (int oc0 = 0; oc0 < output_depth;) {
++          const size_t vl = __riscv_vsetvl_e32m2(output_depth - oc0);
++          vint32m2_t acc;
++
++          if (interior) {
++            acc = __riscv_vmul_vx_i32m2(
++                __riscv_vle32_v_i32m2(&tapsum[oc0], vl), input_offset, vl);
++            const int8_t* win =
++                batch_base_ptr + in_y_origin * row_stride +
++                in_x_origin * col_stride;
++            for (int ky = 0; ky < 3; ++ky) {
++              for (int kx = 0; kx < 3; ++kx) {
++                const int8_t* in_pix = win + ky * row_stride + kx * col_stride;
++                for (int kc = 0; kc < 3; ++kc) {
++                  const int tap = ky * (filter_width * input_depth) +
++                                  kx * input_depth + kc;
++                  const vint32m2_t fil_vec = __riscv_vle32_v_i32m2(
++                      &fil_oc[tap * output_depth + oc0], vl);
++                  acc = __riscv_vmacc_vx_i32m2(
++                      acc, static_cast<int32_t>(in_pix[kc]), fil_vec, vl);
++                }
++              }
++            }
++          } else {
++            acc = __riscv_vmv_v_x_i32m2(0, vl);
++            for (int ky = 0; ky < 3; ++ky) {
++              const int in_y = in_y_origin + ky;
++              if (in_y < 0 || in_y >= input_height) continue;
++              for (int kx = 0; kx < 3; ++kx) {
++                const int in_x = in_x_origin + kx;
++                if (in_x < 0 || in_x >= input_width) continue;
++                const int8_t* in_pix =
++                    batch_base_ptr + in_y * row_stride + in_x * col_stride;
++                for (int kc = 0; kc < 3; ++kc) {
++                  const int32_t in_val =
++                      static_cast<int32_t>(in_pix[kc]) + input_offset;
++                  const int tap = ky * (filter_width * input_depth) +
++                                  kx * input_depth + kc;
++                  const vint32m2_t fil_vec = __riscv_vle32_v_i32m2(
++                      &fil_oc[tap * output_depth + oc0], vl);
++                  acc = __riscv_vmacc_vx_i32m2(acc, in_val, fil_vec, vl);
++                }
 +              }
 +            }
 +          }
 +
-+          __riscv_vse32_v_i32m1(&out_acc[oc0], acc, vl);
++          __riscv_vse32_v_i32m2(&out_acc[oc0], acc, vl);
 +          oc0 += vl;
 +        }
 +      }
@@ -165,11 +205,11 @@ index b24a2a55..5680c1a1 100644
 +}
 +
 +
-+  
++
  // Specialized 4x4 Conv2D kernel with LMUL=4 for high channel counts (up to 64).
  void Conv2D_4x4(const tflite::ConvParams& params,
                  const coralnpu_v2::opt::litert_micro::OpDataConvCustom& data,
-@@ -928,6 +1051,290 @@ void Conv_4_4_48_Stride1(
+@@ -928,6 +1091,294 @@ void Conv_4_4_48_Stride1(
                   batches * output_height * output_width, output_depth);
  }
  
@@ -251,12 +291,16 @@ index b24a2a55..5680c1a1 100644
 +        // VLEN=128), slashing loop overhead in this overhead-bound kernel.
 +        for (int oc0 = 0; oc0 < output_depth;) {
 +          const size_t vl = __riscv_vsetvl_e32m8(output_depth - oc0);
-+          vint32m8_t acc = __riscv_vmv_v_x_i32m8(0, vl);
++          // Seed the accumulator with the input zero-point term so the streamed
++          // inputs need no per-element offset add:
++          //   sum_ic (in[ic] + off) * W[oc][ic]
++          //     == off * weight_sums[oc] + sum_ic in[ic] * W[oc][ic]
++          vint32m8_t acc = __riscv_vmul_vx_i32m8(
++              __riscv_vle32_v_i32m8(&weight_sums[oc0], vl), input_offset, vl);
 +
 +          // Stream input channels; broadcast-MAC into the od lanes.
 +          for (int ic = 0; ic < input_depth; ++ic) {
-+            const int32_t in_val =
-+                static_cast<int32_t>(in_pix[ic]) + input_offset;
++            const int32_t in_val = static_cast<int32_t>(in_pix[ic]);
 +            // Row ic of the [ic][od] repacked weights, offset to this od tile.
 +            const vint32m8_t w =
 +                __riscv_vle32_v_i32m8(&W_icod[ic * output_depth + oc0], vl);
@@ -460,7 +504,7 @@ index b24a2a55..5680c1a1 100644
  void Conv_4_4_16(const ConvParams& params, const OpDataConvCustom& data,
                   const int32_t* output_multiplier, const uint8_t* shift_left,
                   const uint8_t* shift_right, TfLiteContext* context,
-@@ -1321,6 +1728,26 @@ void ConvPerChannel(const ConvParams& params, const OpDataConvCustom& data,
+@@ -1321,6 +1772,26 @@ void ConvPerChannel(const ConvParams& params, const OpDataConvCustom& data,
      Conv2D_4x4(params, data, input_shape, input_data, filter_shape,
                 filter_data_copy.get(), bias_data_copy.get(), output_shape,
                 output_data, data.repacked_weights_generic, context);
@@ -487,7 +531,7 @@ index b24a2a55..5680c1a1 100644
    } else {
      MicroPrintf("Fallback kernel: fh=%d fw=%d id=%d od=%d", filter_height,
                  filter_width, input_depth, output_depth);
-@@ -1384,6 +1811,7 @@ void* ConvInit(TfLiteContext* context, const char* buffer, size_t length) {
+@@ -1384,6 +1855,7 @@ void* ConvInit(TfLiteContext* context, const char* buffer, size_t length) {
      data->accs_buffer_index = -1;
      data->tiled_input_buffer_index = -1;
      data->generic_tiled_buffer_index = -1;
@@ -495,20 +539,22 @@ index b24a2a55..5680c1a1 100644
    }
    return ptr;
  }
-@@ -1410,6 +1838,12 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+@@ -1410,6 +1882,14 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
    TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
        context, required_bytes, &data->accs_buffer_index));
  
 +  // added
 +
-+  // Scratch for the 3x3x3->8 stem kernel's pre-gathered [tap][oc] weights.
++  // Scratch for the 3x3x3->8 stem kernel's pre-gathered [tap][oc] weights,
++  // plus 8 trailing int32 holding sum_tap W[oc][tap] (the input zero-point
++  // fold for output pixels whose 3x3 window is fully in bounds).
 +  TF_LITE_ENSURE_STATUS(context->RequestScratchBufferInArena(
-+      context, 27 * 8 * sizeof(int32_t), &data->gathered_weights_index));
++      context, (27 * 8 + 8) * sizeof(int32_t), &data->gathered_weights_index));
 +
    TfLiteTensor* input =
        micro_context->AllocateTempInputTensor(node, kConvInputTensor);
    TfLiteTensor* filter =
-@@ -1476,6 +1910,58 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
+@@ -1476,6 +1956,57 @@ TfLiteStatus ConvPrepare(TfLiteContext* context, TfLiteNode* node) {
      data->weight_sums = nullptr;
    }
  
@@ -563,7 +609,6 @@ index b24a2a55..5680c1a1 100644
 +        reinterpret_cast<int8_t*>(repacked_1x1);
 +  }
 +
-+  
    micro_context->DeallocateTempTfLiteTensor(input);
    micro_context->DeallocateTempTfLiteTensor(filter);
    micro_context->DeallocateTempTfLiteTensor(output);

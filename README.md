@@ -12,15 +12,19 @@ without forking the whole repo.
 
 * **Optimized conv kernels** (`patches/0001-add-v2-conv-kernels.patch`,
   touching `conv.cc`, `accumulator_util.h`, and `memory_util.h`): vectorized
-  int8 kernels for the MobileNet stem (`Conv_3_3_3_8`, tiled over output
-  channels) and the pointwise 1x1 layers (`Conv_1x1_Pointwise`, a broadcast MAC
-  at `e32m8` covering 32 output channels per instruction), the dispatch that
-  routes those shapes to them, a scalar `PrepareShiftParams` (fixes a requant
-  corruption on the 1000-class classifier), and a one-field addition to
-  `memory_util.h`. This cuts CONV_2D from ~73.6M to ~20.1M cycles and the whole
-  model from ~136M to ~33M cycles per image, bit-exact against the scalar
-  reference. (The file also carries `*_V2` scalar variants as an unused
-  bit-reference used during bring-up.)
+  int8 kernels for the MobileNet stem (`Conv_3_3_3_8`, a broadcast MAC at
+  `e32m2` whose 8 lanes cover all 8 output channels in one tile) and the
+  pointwise 1x1 layers (`Conv_1x1_Pointwise`, a broadcast MAC at `e32m8`
+  covering 32 output channels per instruction), the dispatch that routes those
+  shapes to them, a scalar `PrepareShiftParams` (fixes a requant corruption on
+  the 1000-class classifier), and a one-field addition to `memory_util.h`. Both
+  kernels seed the accumulator with `input_offset * sum(W)` rather than adding
+  the input zero point to every input element; the stem takes that fast path
+  for output pixels whose 3x3 window is fully in bounds and falls back to the
+  bounds-checked path at the borders. This cuts CONV_2D from ~73.6M to ~12.7M
+  cycles and the whole model from ~136M to ~26M cycles per image, bit-exact
+  against the scalar reference. (The file also carries `*_V2` scalar variants
+  as an unused bit-reference used during bring-up.)
 * **npusim MobileNet examples** (`patches/0002-wire-npusim-examples.patch`
   plus `overlay/`): a real ImageNet-trained MobileNet V1 0.25 runner and a
   kernel verifier that runs the model over 10 random ImageNet validation
@@ -82,16 +86,16 @@ before step 3: `python3 coralnpu/tests/npusim_examples/mobilenet/prepare_val_ima
 --seed 42 --count 10`.
 
 **Time:** step 3's first run fetches Bazel deps (MPACT simulator, tflite_micro)
-over the network, then simulates 10 images at ~33M cycles each — budget
+over the network, then simulates 10 images at ~26M cycles each — budget
 ~15-25 min total (dominated by the one-time dep fetch and build).
 
 ## Expected result
 
 `--seed 42 --count 10` samples classes 25, 104, 114, 142, 228, 250, 281, 654,
 754, 759. The verifier passes at top-1 >= 4/10 and top-5 >= 6/10; a
-representative run scores 4/10 top-1 and 6/10 top-5 at ~33M cycles per image
-(CONV_2D ~20.1M, ~75% of the total). A broken kernel collapses these to ~0,
-which is the failure signal. See
+representative run scores 4/10 top-1 and 6/10 top-5 at ~26M cycles per image
+(CONV_2D ~12.7M, ~65% of the total; the stem alone is ~4.3M). A broken kernel
+collapses these to ~0, which is the failure signal. See
 `overlay/tests/npusim_examples/mobilenet/README.md` for the full flow and
 log-line reference.
 

@@ -36,7 +36,7 @@ real inputs: a broken kernel collapses these metrics to ~0 (bit-identical
 garbage), whereas correct kernels produce sensible predictions and reasonable
 near-misses. A representative run scores 4/10 top-1 and 6/10 top-5 (e.g. exact
 hits on *European fire salamander*, *dowitcher*, *komondor*, *reflex camera*;
-*tabby* landing just behind *Egyptian cat*), at ~33M cycles per image.
+*tabby* landing just behind *Egyptian cat*), at ~26M cycles per image.
 
 ### Regenerating / resampling the images
 
@@ -199,13 +199,20 @@ softmax resolution is 1/256 (~0.4%).
   option of `generate_cc_arrays` in `rules/utils.bzl`) or growing
   `itcm_size_kbytes` in `BUILD`.
 * **Conv kernels:** the dispatch in `sw/opt/litert-micro/conv.cc` routes the
-  stem (3x3x3->8) to `Conv_3_3_3_8` (vectorized, tiled over output channels)
-  and the 1x1 pointwise shapes to `Conv_1x1_Pointwise` (broadcast MAC at
-  `e32m8`, 32 output channels per instruction). Both are bit-exact against the
-  scalar `_V2` reference kernels, which remain in the file as an unused
+  stem (3x3x3->8) to `Conv_3_3_3_8` (broadcast MAC at `e32m2`, whose 8 lanes
+  cover all 8 output channels in one tile) and the 1x1 pointwise shapes to
+  `Conv_1x1_Pointwise` (broadcast MAC at `e32m8`, 32 output channels per
+  instruction). Both seed the accumulator with `input_offset * sum(W)` instead
+  of adding the input zero point to every input element; the stem does this on
+  a fast path for output pixels whose 3x3 window is fully in bounds, falling
+  back to the bounds-checked path at the borders. Both are bit-exact against
+  the scalar `_V2` reference kernels, which remain in the file as an unused
   bit-reference from bring-up.
 * **Expected result for the cat image:** top-1 "tabby" (raw -61, ~26%), with
-  Egyptian cat / tiger cat close behind, in ~33M cycles.
+  Egyptian cat / tiger cat close behind, in ~26M cycles. The stem is the
+  single most expensive node (~4.3M cycles, 16%): it runs at the largest
+  spatial extent (112x112) while being the narrowest layer in the channel
+  dimension that these kernels vectorize over.
 
 ## Understanding the simulator log lines
 
