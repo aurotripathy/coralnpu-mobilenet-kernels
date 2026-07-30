@@ -32,8 +32,11 @@ def load_input_from_npy(npy_path):
 
     The returned array is a 1-D ``np.int8`` array of length 224*224*3, ready
     to be written into the ``inference_input`` buffer. The model's input
-    quantization is (scale=1/127.5, zero_point=0) over a [-1, 1] preprocessed
-    domain, which maps uint8 pixels to ``pixel - 128``.
+    quantization is (scale=1.0, zero_point=-128) over the raw [0, 255] pixel
+    domain, so encoding a pixel is exactly ``pixel - 128`` (lossless); the conv
+    kernels add ``input_offset = +128`` back before accumulating. MobileNet's
+    ``x/127.5 - 1`` preprocessing is *not* applied here: it is folded into the
+    first conv's weights and BatchNorm (see ``make_models/README.md``).
 
     Args:
         npy_path: Path to a ``.npy`` file holding a 224x224x3 image.
