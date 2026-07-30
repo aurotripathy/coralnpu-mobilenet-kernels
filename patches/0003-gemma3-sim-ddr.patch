@@ -1,0 +1,23 @@
+diff --git a/sw/coralnpu_sim/coralnpu_v2_sim_utils.py b/sw/coralnpu_sim/coralnpu_v2_sim_utils.py
+index e147c498..0b921b22 100644
+--- a/sw/coralnpu_sim/coralnpu_v2_sim_utils.py
++++ b/sw/coralnpu_sim/coralnpu_v2_sim_utils.py
+@@ -20,7 +20,8 @@ import numpy as np
+ class CoralNPUV2Simulator:
+   """Wrapper for CoralNPUV2SimulatorPy providing helper methods."""
+ 
+-  def __init__(self, highmem_ld=True, exit_on_ebreak=True, semihost_htif=True):
++  def __init__(self, highmem_ld=True, exit_on_ebreak=True, semihost_htif=True,
++               ddr_length_bytes=0x8000000):
+     self.options = coralnpu_v2_sim_pybind.CoralNPUSimulatorOptions()
+     self.options.semihost_htif = semihost_htif
+     if highmem_ld:
+@@ -28,7 +29,7 @@ class CoralNPUV2Simulator:
+       self.itcm_region = self._create_memory_region(0x0, 0x00100000, MP.kReadWriteExecute)
+       self.dtcm_region = self._create_memory_region(0x100000, 0x100000, MP.kReadWrite)
+       self.extmem_region = self._create_memory_region(0x20000000, 0x400000, MP.kReadWrite)
+-      self.ddr_region = self._create_memory_region(0x80000000, 0x8000000, MP.kReadWriteExecute)
++      self.ddr_region = self._create_memory_region(0x80000000, ddr_length_bytes, MP.kReadWriteExecute)
+       self.options.initial_misa_value = 0x40201120
+       self.options.memory_regions = [self.itcm_region, self.dtcm_region, self.extmem_region, self.ddr_region]
+     if exit_on_ebreak:

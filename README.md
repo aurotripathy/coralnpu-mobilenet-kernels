@@ -1,11 +1,12 @@
-# CoralNPU MobileNet kernel + npusim examples
+# CoralNPU npusim examples: MobileNet kernels + Gemma 3
 
 A minimal overlay on top of the upstream
 [`google-coral/coralnpu`](https://github.com/google-coral/coralnpu) repo that
-adds two optimized int8 convolution kernels and an end-to-end MobileNet V1
-verification flow for the instruction-level simulator (`npusim`). It lets
-another developer reproduce the work against a pinned upstream commit without
-forking the whole repo.
+adds two things for the instruction-level simulator (`npusim`): optimized int8
+convolution kernels with an end-to-end MobileNet V1 verification flow, and a
+bare-metal Gemma 3 270M decoder that runs a full prefill + greedy generation.
+It lets another developer reproduce the work against a pinned upstream commit
+without forking the whole repo.
 
 ## What this adds
 
@@ -24,6 +25,17 @@ forking the whole repo.
   plus `overlay/`): a real ImageNet-trained MobileNet V1 0.25 runner and a
   kernel verifier that runs the model over 10 random ImageNet validation
   images and checks top-1/top-5 against ground truth.
+* **Gemma 3 270M decoder** (`patches/0003-gemma3-sim-ddr.patch` plus
+  `overlay/tests/npusim_examples/gemma3/`): a hand-rolled bare-metal RVV decoder
+  (`run_gemma3_decode.cc`) with int8 weights + fp32 activations and a W8A8
+  integer matmul (CoralNPU's RVV has no vector int->float), driven by an npusim
+  ELF driver (`npusim_run_gemma3.py`). It runs prefill + KV-cache greedy decode
+  over all 18 layers and reproduces the bfloat16 host reference's first token
+  (818) with 18/19 tokens matching. The patch only enlarges the simulated DDR
+  region (a `ddr_length_bytes` param) so the 270 MB int8 weight blob fits;
+  everything else is net-new. See
+  `overlay/tests/npusim_examples/gemma3/README.md` for the design and the
+  host-side prep (`host_ref/`).
 
 ## Layout
 
@@ -83,10 +95,28 @@ which is the failure signal. See
 `overlay/tests/npusim_examples/mobilenet/README.md` for the full flow and
 log-line reference.
 
+## Gemma 3 270M (optional, extra host prep)
+
+`apply.sh` copies the Gemma files and applies the DDR patch automatically, but
+the example is **not** wired into the automated run: it needs the gated
+`google/gemma-3-270m-it` checkpoint plus a ~270 MB int8 weight blob and a
+bfloat16 reference that live outside the repo (in `~/gemma3_ref`), produced on
+the host. In a Python env with `torch`, `transformers`, and Hugging Face access:
+
+```bash
+cd coralnpu/tests/npusim_examples/gemma3/host_ref
+python gen_reference.py          # bf16 golden reference -> ~/gemma3_ref
+python pack_weights.py           # int8 blob + gemma3_layout.h
+(cd ../../../.. && bazel run //tests/npusim_examples/gemma3:npusim_run_gemma3)
+```
+
+Full design, precision rationale, and expected output are in
+`overlay/tests/npusim_examples/gemma3/README.md` and `.../host_ref/README.md`.
+
 ## Applying to a different upstream commit
 
 The patches are pinned to `BASE_COMMIT`. On a newer coralnpu, `apply.sh` warns
 and `git apply --check` may fail if the upstream `conv.cc`,
-`accumulator_util.h`, or `memory_util.h` have diverged; in that case rebase the
-two patches in `patches/` by hand (the overlay files are net-new and copy in
-regardless).
+`accumulator_util.h`, `memory_util.h`, or `coralnpu_v2_sim_utils.py` have
+diverged; in that case rebase the patches in `patches/` by hand (the overlay
+files are net-new and copy in regardless).
