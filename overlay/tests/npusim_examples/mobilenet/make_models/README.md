@@ -77,3 +77,24 @@ The model is a derivative of Keras Applications MobileNet ImageNet weights
 (downloaded by `weights='imagenet'`), not an independently trained artifact.
 Confirm redistribution rights for those weights before publishing the `.tflite`
 outside this repo.
+
+## TBD: remaining MobileNet optimization
+
+Kernel-side work in `sw/opt/litert-micro/conv.cc`, not model generation, but
+tracked here with the rest of the MobileNet provenance. Current state: ~26M
+cycles/image after the `e32m2` stem tiling and the input-offset folds
+(`input_offset * sum(W)` accumulator seeding) in both `Conv_3_3_3_8` and
+`Conv_1x1_Pointwise`.
+
+* **Restructure the stem to vectorize over output pixels instead of output
+  channels.** The stem (`Conv_3_3_3_8`, node 0) is still the single most
+  expensive node at ~4.3M cycles (16% of inference), spending ~12.6 cycles per
+  tap iteration on what is only a vector load + MAC: with just 8 output
+  channels it fills 8 lanes at best, and the same 864 bytes of gathered
+  weights are re-fetched for all 12,544 output pixels. Vectorizing across
+  `out_x` would broadcast weights as scalars and keep them out of the load
+  stream, but input pixels for consecutive `out_x` are 6 bytes apart
+  (stride 2 x 3 channels), so it needs strided loads (`vlse8`) or a gather —
+  a rewrite, not a tweak.
+* **MEAN and SOFTMAX** are the next-largest non-conv nodes (~1.6M and ~1.2M
+  cycles, ~5% and ~4%); neither has been vectorized.
