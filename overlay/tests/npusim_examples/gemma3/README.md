@@ -208,6 +208,26 @@ residual maxdiffs; step-0 argmax 818 is the top-level gate.
     strong signal. A decode step costs ~1.2e8 cycles, dominated by the logits
     head (the Phase 6 optimization target).
 
+## TBD: Phase 6 — optimize + measure
+
+Phases 1-5 are done (host reference, weight packing, bare-metal decode, sim
+integration, verification: 18/19 tokens matching the bf16 reference); Phase 6
+is still open. A decode step costs ~1.2e8 cycles and the 21-token prefill
+~1.16e9, both dominated by the logits head: the tied-embedding 640 x 262144
+matmul is the single biggest matmul in the model (~62% of per-token cost).
+Candidate attacks:
+
+* **Higher-LMUL / vectorized logits kernel** — the head reuses the generic
+  `MatVecI8W`; a dedicated kernel can stream the vocab dimension wider.
+* **int4 embedding** — halves the dominant weight traffic for the head and
+  the embedding lookup.
+* **Restrict logits to a candidate token set** — greedy decode only needs
+  argmax, so a shortlist (or emitting logits int8 via the classifier kernel)
+  avoids most of the 262k columns.
+* Also from the original phase plan: vectorize softmax and RMSNorm, profile
+  with the `mcycle` CycleProfiler, report cycles/token and tokens/s, then
+  revisit int8 activations.
+
 ## Risks / open questions
 
 * **int8 residual drift:** with int8 weights, late-layer residual maxdiffs reach
