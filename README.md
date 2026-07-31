@@ -55,6 +55,14 @@ The 10 validation image tensors (`images/val_*_224x224.npy`, ~1.5 MB) are
 `prepare_val_images.py` (fixed seed), so only the model, labels, manifest, and
 the reference cat image are carried here.
 
+The shipped `.tflite` is not from a model zoo — it is Keras Applications
+MobileNet V1 (`alpha=0.25`, 224x224, `weights='imagenet'`) with the
+`x/127.5 - 1` input preprocessing folded into `conv1`'s weights and BatchNorm,
+then fully int8-quantized. The scripts that produced it are carried under
+`mobilenet/make_models/` for provenance; see that folder's `README.md` for the
+lineage and how to regenerate. Note the weights are Keras ImageNet weights, so
+confirm redistribution rights before reusing the `.tflite` elsewhere.
+
 ## Reproduce
 
 Prerequisites: Bazel 7.4.1 (via `bazelisk`, which reads `.bazelversion`) and
