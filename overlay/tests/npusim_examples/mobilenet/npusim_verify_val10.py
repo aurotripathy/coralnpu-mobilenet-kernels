@@ -108,7 +108,7 @@ def main():
     r = runfiles.Create()
     elf_file = r.Rlocation(f'{PKG}/run_full_mobilenet_v1_real_binary.elf')
     labels_file = r.Rlocation(f'{PKG}/labels/imagenet_labels.txt')
-    manifest_file = r.Rlocation(f'{PKG}/images/val10_manifest.json')
+    manifest_file = r.Rlocation(f'{PKG}/images_224x224x3/val10_manifest.json')
 
     labels = load_imagenet_labels(labels_file)
     with open(manifest_file) as f:
@@ -120,7 +120,7 @@ def main():
     print(f"Verifying kernels on {len(manifest)} random ImageNet val images")
     for entry in manifest:
         gt = entry['class_index']
-        npy_path = r.Rlocation(f"{PKG}/images/{entry['npy']}")
+        npy_path = r.Rlocation(f"{PKG}/images_224x224x3/{entry['npy']}")
         print()
         in_top1, in_top5, cycles = run_one(elf_file, npy_path, labels, gt)
         top1_hits += in_top1

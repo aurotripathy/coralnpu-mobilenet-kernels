@@ -6,8 +6,8 @@ This folder contains end-to-end examples that run MobileNet V1 (alpha 0.25,
 | Target | Model | Input | Output |
 |---|---|---|---|
 | `:npusim_run_mobilenet` | `mobilenet_v1_0.25_224_int8_dummy.tflite` (untrained weights, 5 classes) | random data | 5 scores |
-| `:npusim_run_real_mobilenet` | `models/mobilenet_v1_025_224_int8_real.tflite` (ImageNet-trained, 1000 classes) | `images/cat_224x224_real.npy` | top-5 ImageNet labels |
-| `:npusim_verify_val10` | same real model | 10 random ImageNet val images (`images/val_*_224x224.npy`) | pass/fail on top-1 & top-5 accuracy |
+| `:npusim_run_real_mobilenet` | `models/mobilenet_v1_025_224_int8_real.tflite` (ImageNet-trained, 1000 classes) | `images_224x224x3/cat_224x224_real.npy` | top-5 ImageNet labels |
+| `:npusim_verify_val10` | same real model | 10 random ImageNet val images (`images_224x224x3/val_*_224x224.npy`) | pass/fail on top-1 & top-5 accuracy |
 
 Run them from the repo root:
 
@@ -20,8 +20,8 @@ bazel run //tests/npusim_examples/mobilenet:npusim_run_real_mobilenet
 `:npusim_verify_val10` is an end-to-end kernel check that runs the real int8
 MobileNet V1 0.25 over 10 images sampled at random (fixed seed) from the
 ImageNet (ILSVRC-2012) validation set, one per class. Each image is
-center-cropped to 224x224x3 and stored as `images/val_<class>_<label>_224x224.npy`;
-`images/val10_manifest.json` records the ground-truth class index and label for
+center-cropped to 224x224x3 and stored as `images_224x224x3/val_<class>_<label>_224x224.npy`;
+`images_224x224x3/val10_manifest.json` records the ground-truth class index and label for
 each. The driver runs the model on every image and compares the top-1/top-5
 prediction against ground truth:
 
@@ -45,7 +45,7 @@ The images and `val10_manifest.json` are produced by
 network access). It samples one image per class from the public
 one-image-per-class ImageNet mirror
 [`EliSchwartz/imagenet-sample-images`](https://github.com/EliSchwartz/imagenet-sample-images),
-center-crops each to 224x224x3, and writes `images/val_<class>_<label>_224x224.npy`
+center-crops each to 224x224x3, and writes `images_224x224x3/val_<class>_<label>_224x224.npy`
 plus the manifest:
 
 ```bash
@@ -56,7 +56,7 @@ The mirror lists files in synset order, so a file's position equals its
 ImageNet class index, which lines up with `labels/imagenet_labels.txt`. The
 default `--seed 42 --count 10` reproduces the committed set exactly (classes
 25, 104, 114, 142, 228, 250, 281, 654, 754, 759); change `--seed` to draw a
-different sample. To swap the set, delete the old `images/val_*_224x224.npy`
+different sample. To swap the set, delete the old `images_224x224x3/val_*_224x224.npy`
 files and the manifest first, then rerun; the `glob` in `BUILD` picks up
 whatever `val_*` files are present, so no `BUILD` edit is needed.
 
@@ -141,7 +141,7 @@ img = img.resize((round(w * s), round(h * s)), Image.BILINEAR)
 w, h = img.size
 img = img.crop(((w - 224) // 2, (h - 224) // 2,
                 (w - 224) // 2 + 224, (h - 224) // 2 + 224))
-np.save("images/my_image_224x224.npy", np.asarray(img, dtype=np.uint8))
+np.save("images_224x224x3/my_image_224x224.npy", np.asarray(img, dtype=np.uint8))
 ```
 
 ### 2. Add the file to the test's runfiles
@@ -154,8 +154,8 @@ py_binary(
     name = "npusim_run_real_mobilenet",
     ...
     data = [
-        "images/cat_224x224_real.npy",
-        "images/my_image_224x224.npy",   # <-- add
+        "images_224x224x3/cat_224x224_real.npy",
+        "images_224x224x3/my_image_224x224.npy",   # <-- add
         "labels/imagenet_labels.txt",
         ":run_full_mobilenet_v1_real_binary",
     ],
@@ -172,7 +172,7 @@ are resolved as:
 
 ```python
 image_file = r.Rlocation(
-    'coralnpu_hw/tests/npusim_examples/mobilenet/images/my_image_224x224.npy')
+    'coralnpu_hw/tests/npusim_examples/mobilenet/images_224x224x3/my_image_224x224.npy')
 ```
 
 ### 4. Run and interpret

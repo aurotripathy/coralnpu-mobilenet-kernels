@@ -78,7 +78,7 @@ index 43011e07..00000000
 -)
 diff --git a/tests/npusim_examples/mobilenet/BUILD b/tests/npusim_examples/mobilenet/BUILD
 new file mode 100644
-index 00000000..fe986e43
+index 00000000..ade3cbf7
 --- /dev/null
 +++ b/tests/npusim_examples/mobilenet/BUILD
 @@ -0,0 +1,121 @@
@@ -117,7 +117,7 @@ index 00000000..fe986e43
 +    name = "npusim_run_real_mobilenet",
 +    srcs = ["npusim_run_real_mobilenet.py"],
 +    data = [
-+        "images/cat_224x224_real.npy",
++        "images_224x224x3/cat_224x224_real.npy",
 +        "labels/imagenet_labels.txt",
 +        ":run_full_mobilenet_v1_real_binary",
 +    ],
@@ -133,9 +133,9 @@ index 00000000..fe986e43
 +    srcs = ["npusim_verify_val10.py"],
 +    data = [
 +        "labels/imagenet_labels.txt",
-+        "images/val10_manifest.json",
++        "images_224x224x3/val10_manifest.json",
 +        ":run_full_mobilenet_v1_real_binary",
-+    ] + glob(["images/val_*_224x224.npy"]),
++    ] + glob(["images_224x224x3/val_*_224x224.npy"]),
 +    deps = [
 +        "//sw/coralnpu_sim:coralnpu_v2_sim_utils_lib",
 +        "@bazel_tools//tools/python/runfiles",

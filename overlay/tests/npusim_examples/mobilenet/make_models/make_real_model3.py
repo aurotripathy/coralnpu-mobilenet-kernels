@@ -11,7 +11,7 @@ import numpy as np
 import tensorflow as tf
 
 _EXAMPLE_DIR = Path(__file__).resolve().parent.parent
-CAT_NPY = str(_EXAMPLE_DIR / 'images' / 'cat_224x224_real.npy')
+CAT_NPY = str(_EXAMPLE_DIR / 'images_224x224x3' / 'cat_224x224_real.npy')
 OUT = str(_EXAMPLE_DIR / 'models' / 'mobilenet_v1_025_224_int8_real.tflite')
 
 model = tf.keras.applications.MobileNet(

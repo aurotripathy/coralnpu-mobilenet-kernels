@@ -77,7 +77,8 @@ def run_real_mobilenet():
     elf_file = r.Rlocation(
         'coralnpu_hw/tests/npusim_examples/mobilenet/run_full_mobilenet_v1_real_binary.elf')
     image_file = r.Rlocation(
-        'coralnpu_hw/tests/npusim_examples/mobilenet/images/cat_224x224_real.npy')
+        'coralnpu_hw/tests/npusim_examples/mobilenet/images_224x224x3/'
+        'cat_224x224_real.npy')
     labels_file = r.Rlocation(
         'coralnpu_hw/tests/npusim_examples/mobilenet/labels/imagenet_labels.txt')
 

@@ -50,7 +50,8 @@ patches/           # diffs for files that already exist upstream
 overlay/           # net-new files, mirroring coralnpu's paths
 ```
 
-The 10 validation image tensors (`images/val_*_224x224.npy`, ~1.5 MB) are
+The 10 validation image tensors (`images_224x224x3/val_*_224x224.npy`,
+~1.5 MB) are
 **not** shipped: they are regenerated deterministically by
 `prepare_val_images.py` (fixed seed), so only the model, labels, manifest, and
 the reference cat image are carried here.

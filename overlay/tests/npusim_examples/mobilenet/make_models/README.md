@@ -56,8 +56,8 @@ source ~/tfenv/bin/activate
 pip install numpy tensorflow pillow
 ```
 
-Then run (from anywhere; the scripts resolve `../images/` and `../models/`
-relative to their own location):
+Then run (from anywhere; the scripts resolve `../images_224x224x3/` and
+`../models/` relative to their own location):
 
 ```bash
 python make_real_model4.py

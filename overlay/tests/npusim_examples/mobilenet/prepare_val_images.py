@@ -16,7 +16,8 @@
 
 Samples N ImageNet (ILSVRC-2012) classes at random (one image per class),
 center-crops each to 224x224x3, and writes them as uint8 .npy files into the
-``images/`` folder next to this script, alongside a ``val10_manifest.json``
+``images_224x224x3/`` folder next to this script, alongside a
+``val10_manifest.json``
 that records each image's ground-truth class index and label.
 
 Images are pulled from the public one-image-per-class ImageNet mirror
@@ -51,7 +52,8 @@ RAW_URL = f"https://raw.githubusercontent.com/{REPO}/master/"
 NUM_CLASSES = 1000  # ImageNet (ILSVRC-2012)
 CROP = 224
 
-IMAGES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images")
+IMAGES_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "images_224x224x3")
 
 
 def list_class_files():
@@ -87,7 +89,8 @@ def main():
     parser.add_argument("--count", type=int, default=10,
                         help="Number of images to sample (default: 10).")
     parser.add_argument("--out", default=IMAGES_DIR,
-                        help="Output images directory (default: ./images).")
+                        help="Output images directory "
+                             "(default: ./images_224x224x3).")
     args = parser.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
