@@ -76,9 +76,14 @@ def run_real_mobilenet():
     r = runfiles.Create()
     elf_file = r.Rlocation(
         'coralnpu_hw/tests/npusim_examples/mobilenet/run_full_mobilenet_v1_real_binary.elf')
+    # A viewable PNG of this image is checked in alongside the .npy at
+    # tests/npusim_examples/mobilenet/images_224x224x3/cat_224x224_real.png
+    # (Rlocation: 'coralnpu_hw/tests/npusim_examples/mobilenet/'
+    # 'images_224x224x3/cat_224x224_real.png').
     image_file = r.Rlocation(
         'coralnpu_hw/tests/npusim_examples/mobilenet/images_224x224x3/'
         'cat_224x224_real.npy')
+    print(f"Viewable PNG of the cat image: {image_file.replace('.npy', '.png')}")
     labels_file = r.Rlocation(
         'coralnpu_hw/tests/npusim_examples/mobilenet/labels/imagenet_labels.txt')
 

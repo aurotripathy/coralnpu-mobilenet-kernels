@@ -1,10 +1,14 @@
-# CoralNPU npusim examples: MobileNet kernels + Gemma 3
+# CoralNPU examples: MobileNet kernels, Gemma 3, YAMNet, RTL runs
 
 A minimal overlay on top of the upstream
 [`google-coral/coralnpu`](https://github.com/google-coral/coralnpu) repo that
-adds two things for the instruction-level simulator (`npusim`): optimized int8
-convolution kernels with an end-to-end MobileNet V1 verification flow, and a
-bare-metal Gemma 3 270M decoder that runs a full prefill + greedy generation.
+adds, for the instruction-level simulator (`npusim`): optimized int8
+convolution kernels with an end-to-end MobileNet V1 verification flow, a
+bare-metal Gemma 3 270M decoder that runs a full prefill + greedy generation,
+and a YAMNet audio-classification example — plus a cocotb testbench that runs
+the real MobileNet on the Verilator RTL model and a minimal repro for an RTL
+vl=0 vector load/store deadlock
+([upstream issue #89](https://github.com/google-coral/coralnpu/issues/89)).
 It lets another developer reproduce the work against a pinned upstream commit
 without forking the whole repo.
 
@@ -40,6 +44,30 @@ without forking the whole repo.
   everything else is net-new. See
   `overlay/tests/npusim_examples/gemma3/README.md` for the design and the
   host-side prep (`host_ref/`).
+* **YAMNet npusim example** (`overlay/tests/npusim_examples/YAMNet/`): an int8
+  PTQ YAMNet audio classifier (`model/yamnet.tflite`) with a 10-clip ESC-50
+  validation set and host-side prep/verification scripts. The large
+  intermediates (`yamnet.h5`, `yamnet_float.tflite`,
+  `yamnet_int8_dynrange.tflite`, ~34 MB) are **not** shipped; regenerate them
+  with `model/convert_yamnet.py` and `make_reference_models.py` (the `.h5` is
+  auto-downloaded from Google storage).
+* **RTL (Verilator) MobileNet run + vl=0 deadlock repro**
+  (`patches/0004-cocotb-rtl-imagenet-support.patch` plus
+  `overlay/tests/cocotb/imagenet/`): a cocotb test that runs the real
+  MobileNet on the `RvvCoreMiniHighmemAxi` RTL model with an HTIF-style
+  server, CSR probes (mepc/mcause/minstret), and wedge detection
+  (`//tests/cocotb/imagenet:imagenet`, manual, ~4.5 h). The full-model run
+  wedges at node 30 (STRIDED_SLICE); the repro suite
+  (`//tests/cocotb/imagenet:head_repro`, testcases
+  `core_mini_rvv_{head,reshape,vl0}_repro`) bisects that down to a bare-metal
+  proof that any vector load/store executed with `vl=0` deadlocks the RVV
+  backend — per the V-spec it must retire as a no-op, and npusim/Spike do so
+  ([upstream issue #89](https://github.com/google-coral/coralnpu/issues/89)).
+  The trigger is GCC's inline RVV memcpy expansion in
+  `tflite::micro::GetTensorShape` executing one iteration for rank-0 tensors.
+  The patch also adds a trace-enabled Verilator model target
+  (`head_repro_waves` dumps a VCD) and HTIF/wedge probes for the tutorial
+  testbench.
 
 ## Layout
 

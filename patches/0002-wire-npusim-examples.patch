@@ -78,10 +78,10 @@ index 43011e07..00000000
 -)
 diff --git a/tests/npusim_examples/mobilenet/BUILD b/tests/npusim_examples/mobilenet/BUILD
 new file mode 100644
-index 00000000..ade3cbf7
+index 00000000..bca2466f
 --- /dev/null
 +++ b/tests/npusim_examples/mobilenet/BUILD
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,146 @@
 +# Copyright 2026 Google LLC
 +#
 +# Licensed under the Apache License, Version 2.0 (the "License");
@@ -99,6 +99,19 @@ index 00000000..ade3cbf7
 +load("@coralnpu_hw//third_party/python:requirements.bzl", "requirement")
 +load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
 +load("//rules:utils.bzl", "generate_cc_arrays")
++
++# Consumed by the RTL run of the same model (//tests/cocotb/imagenet).
++exports_files([
++    "images_224x224x3/cat_224x224_real.npy",
++    "labels/imagenet_labels.txt",
++])
++
++# The auto-generated "<name>.elf" filegroup is package-private; re-export it.
++filegroup(
++    name = "run_full_mobilenet_v1_real_binary_elf",
++    srcs = [":run_full_mobilenet_v1_real_binary.elf"],
++    visibility = ["//visibility:public"],
++)
 +
 +py_binary(
 +    name = "npusim_run_mobilenet",
@@ -128,15 +141,27 @@ index 00000000..ade3cbf7
 +    ],
 +)
 +
++# Host-CPU TFLite cross-check helpers. Also runnable standalone (see the
++# module docstring); the interpreter package itself is intentionally NOT a
++# dep here -- it is invoked through an external Python via subprocess.
++py_library(
++    name = "cpu_reference",
++    srcs = ["utils/cpu_reference.py"],
++    imports = ["utils"],
++    deps = [requirement("numpy")],
++)
++
 +py_binary(
 +    name = "npusim_verify_val10",
 +    srcs = ["npusim_verify_val10.py"],
 +    data = [
 +        "labels/imagenet_labels.txt",
 +        "images_224x224x3/val10_manifest.json",
++        "models/mobilenet_v1_025_224_int8_real.tflite",
 +        ":run_full_mobilenet_v1_real_binary",
 +    ] + glob(["images_224x224x3/val_*_224x224.npy"]),
 +    deps = [
++        ":cpu_reference",
 +        "//sw/coralnpu_sim:coralnpu_v2_sim_utils_lib",
 +        "@bazel_tools//tools/python/runfiles",
 +        requirement("numpy"),

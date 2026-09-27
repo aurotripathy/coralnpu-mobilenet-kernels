@@ -28,11 +28,15 @@ them; any run that is bit-identical garbage (e.g. a broken kernel) collapses
 these metrics to ~0, which is the failure signal we care about.
 """
 
+import argparse
 import json
 
 from bazel_tools.tools.python.runfiles import runfiles
 from coralnpu_v2_sim_utils import CoralNPUV2Simulator
 import numpy as np
+
+from cpu_reference import (compare_scores, compare_topk,
+                           cpu_scores_via_subprocess)
 
 EXPECTED_SHAPE = (224, 224, 3)
 NUM_CLASSES = 1000  # ImageNet (ILSVRC-2012)
@@ -65,7 +69,7 @@ def load_imagenet_labels(labels_path):
 def run_one(elf_file, npy_path, labels, gt):
     """Runs the model on a single image and prints a per-image report.
 
-    Returns the (in_top1, in_top5, cycles) tuple for this image.
+    Returns the (in_top1, in_top5, cycles, scores) tuple for this image.
     """
     print(f"Running real mobilenet on {labels[gt]}...")
     npu_sim = CoralNPUV2Simulator(highmem_ld=True, exit_on_ebreak=True)
@@ -101,14 +105,45 @@ def run_one(elf_file, npy_path, labels, gt):
     in_top5 = gt in top5
     verdict = "PASS" if in_top1 else ("top-5" if in_top5 else "MISS")
     print(f"Expected class {gt} ({labels[gt]}) -> {verdict}")
-    return in_top1, in_top5, cycles
+    return in_top1, in_top5, cycles, scores
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--cpu-check', metavar='PYTHON', default=None,
+        help='Also run each image through a host TFLite interpreter and '
+             'compare the raw int8 scores. Takes the path to a Python with '
+             'a TFLite interpreter installed (e.g. ~/litertenv/bin/python); '
+             'the Bazel environment itself has none.')
+    parser.add_argument(
+        '--cpu-tol', type=int, default=48,
+        help='Max allowed |sim - cpu| per score in LSB. Default 48: an '
+             'empirical envelope over the benign 3-38 LSB TFLM-vs-TFLite '
+             'op-semantics drift measured on the val10 set (see '
+             'utils/cpu_reference.py); broken kernels miss by 100+.')
+    parser.add_argument(
+        '--cpu-top1-agree', type=int, default=8,
+        help='Min images (of 10) where sim and CPU assign the same top-1 '
+             'label (tie-aware). Default 8: on low-confidence images with '
+             'near-flat scores, the benign TFLM-vs-TFLite drift legitimately '
+             'flips near-tied winners (measured 9/10); a broken kernel '
+             'agrees on ~0.')
+    parser.add_argument(
+        '--cpu-top5-overlap', type=float, default=3.5,
+        help='Min AVERAGE |sim top-5 & cpu top-5| across images (default '
+             '3.5; measured 4.0). Per-image gating is too fragile: on '
+             'ambiguous images ranks 2-5 sit within a few LSB of the -128 '
+             'floor, where ordering is arbitrary.')
+    args = parser.parse_args()
+
     r = runfiles.Create()
     elf_file = r.Rlocation(f'{PKG}/run_full_mobilenet_v1_real_binary.elf')
     labels_file = r.Rlocation(f'{PKG}/labels/imagenet_labels.txt')
     manifest_file = r.Rlocation(f'{PKG}/images_224x224x3/val10_manifest.json')
+    tflite_file = r.Rlocation(
+        f'{PKG}/models/mobilenet_v1_025_224_int8_real.tflite')
+    cpu_ref_script = r.Rlocation(f'{PKG}/utils/cpu_reference.py')
 
     labels = load_imagenet_labels(labels_file)
     with open(manifest_file) as f:
@@ -117,25 +152,70 @@ def main():
     top1_hits = 0
     top5_hits = 0
     total_cycles = 0
+    cpu_fail_images = 0
+    cpu_worst_diff = 0
+    cpu_top1_agree_count = 0
+    cpu_overlap_total = 0
     print(f"Verifying kernels on {len(manifest)} random ImageNet val images")
     for entry in manifest:
         gt = entry['class_index']
         npy_path = r.Rlocation(f"{PKG}/images_224x224x3/{entry['npy']}")
         print()
-        in_top1, in_top5, cycles = run_one(elf_file, npy_path, labels, gt)
+        in_top1, in_top5, cycles, scores = run_one(
+            elf_file, npy_path, labels, gt)
         top1_hits += in_top1
         top5_hits += in_top5
         total_cycles += cycles
+
+        if args.cpu_check:
+            cpu_scores = cpu_scores_via_subprocess(
+                args.cpu_check, cpu_ref_script, tflite_file, npy_path)
+            ok, max_diff, n_bad = compare_scores(
+                scores, cpu_scores, tol=args.cpu_tol)
+            cpu_worst_diff = max(cpu_worst_diff, max_diff)
+            cpu_fail_images += not ok
+            print(f"CPU cross-check: max |sim - cpu| = {max_diff} LSB -> "
+                  f"{'OK' if ok else f'FAIL ({n_bad} scores beyond tol)'}")
+
+            top1_agree, overlap, _, cpu_top5 = compare_topk(
+                scores, cpu_scores, k=5)
+            cpu_top1 = int(np.argmax(cpu_scores))
+            cpu_top1_agree_count += top1_agree
+            cpu_overlap_total += overlap
+            print(f"CPU top-1: class {cpu_top1} ({labels[cpu_top1]}) -> "
+                  f"{'agrees with sim' if top1_agree else 'DISAGREES with sim'}"
+                  f"; top-5 overlap {overlap}/5")
+            if overlap < 5:
+                print("CPU top-5: " + ", ".join(
+                    f"{i} ({labels[i]}): {cpu_scores[i]}" for i in cpu_top5))
 
     n = len(manifest)
     print(f"\nTop-1 accuracy: {top1_hits}/{n}")
     print(f"Top-5 accuracy: {top5_hits}/{n}")
     print(f"cycles taken by the simulation {total_cycles}")
+    mean_overlap = cpu_overlap_total / n if n else 0.0
+    if args.cpu_check:
+        print(f"CPU cross-check: worst per-score diff {cpu_worst_diff} LSB "
+              f"(tol {args.cpu_tol}), {cpu_fail_images}/{n} images failed")
+        print(f"CPU label agreement: top-1 {cpu_top1_agree_count}/{n} "
+              f"(need >={args.cpu_top1_agree}), mean top-5 overlap "
+              f"{mean_overlap:.1f}/5 (need >={args.cpu_top5_overlap})")
 
     if top1_hits < MIN_TOP1 or top5_hits < MIN_TOP5:
         raise SystemExit(
             f"Kernel verification FAILED: top1={top1_hits} (need >={MIN_TOP1}), "
             f"top5={top5_hits} (need >={MIN_TOP5})")
+    if args.cpu_check and cpu_fail_images:
+        raise SystemExit(
+            f"Kernel verification FAILED: {cpu_fail_images}/{n} images "
+            f"disagree with the CPU reference beyond {args.cpu_tol} LSB")
+    if args.cpu_check and (cpu_top1_agree_count < args.cpu_top1_agree
+                           or mean_overlap < args.cpu_top5_overlap):
+        raise SystemExit(
+            f"Kernel verification FAILED: sim/CPU label agreement too low: "
+            f"top-1 {cpu_top1_agree_count}/{n} "
+            f"(need >={args.cpu_top1_agree}), mean top-5 overlap "
+            f"{mean_overlap:.1f} (need >={args.cpu_top5_overlap})")
     print("Kernel verification PASSED")
 
 

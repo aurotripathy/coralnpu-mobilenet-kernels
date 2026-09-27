@@ -38,6 +38,73 @@ near-misses. A representative run scores 4/10 top-1 and 6/10 top-5 (e.g. exact
 hits on *European fire salamander*, *dowitcher*, *komondor*, *reflex camera*;
 *tabby* landing just behind *Egyptian cat*), at ~26M cycles per image.
 
+### Optional: CPU cross-check
+
+`--cpu-check` additionally runs each image through a host TFLite interpreter
+executing the *same* int8 `.tflite` and compares the raw int8 score vectors
+(`utils/cpu_reference.py`). The CPU run is integer inference — int8 kernels,
+int32 accumulators — not fp32/bf16; that is what makes the scores comparable
+at all. The interpreter is not part of the Bazel environment, so pass a
+Python that has one:
+
+```bash
+python3 -m venv ~/litertenv
+~/litertenv/bin/pip install ai-edge-litert numpy
+bazel run //tests/npusim_examples/mobilenet:npusim_verify_val10 -- \
+    --cpu-check ~/litertenv/bin/python
+```
+
+Two comparisons run per image:
+
+* **Scores** (`--cpu-tol`, default 48 LSB): max per-class |sim - cpu|. Do not
+  tighten it expecting a bit-exact match: TFLM and TFLite implement some
+  fixed-point ops (MEAN, SOFTMAX) differently, giving a benign 3-38 LSB
+  spread on this set even though the conv kernels themselves track the TFLM
+  reference to 1 LSB. The CPU path pins the `BUILTIN_REF` op resolver — the
+  default XNNPack delegate drifts a few more LSB via its fp32
+  requantization. A broken kernel misses by 100+ LSB, which is what the gate
+  catches.
+* **Labels**: does the CPU assign the same top-1 (tie-aware) and top-5 as the
+  sim, right or wrong vs ground truth? Reported per image; gated on
+  aggregates (`--cpu-top1-agree`, default 8/10 images; `--cpu-top5-overlap`,
+  default mean 3.5/5) rather than per image, because on low-confidence
+  images the score distribution is nearly flat — ranks 2-5 sit within a few
+  LSB of the -128 floor, and the benign drift above legitimately reorders
+  near-ties (a representative run agrees 9/10 on top-1 with mean overlap
+  4.0; the one disagreement is *radio*, where both runs are wrong vs ground
+  truth and the CPU's winner leads by ~4 LSB over a flat field). A broken
+  kernel agrees on ~0/10.
+
+### Why sim and CPU differ: TFLM vs TensorFlow Lite (LiteRT)
+
+The two sides of the cross-check are **different runtimes** that happen to
+execute the same `.tflite` flatbuffer:
+
+* **TFLM** (TensorFlow Lite for Microcontrollers, the `tflite-micro`
+  project) is what the simulator ELF runs: a bare-metal re-implementation
+  with no OS, no heap (tensors live in a fixed pre-allocated arena), no
+  delegates, and only explicitly registered kernels.
+  `run_full_mobilenet_v1_real.cc` builds a TFLM `MicroInterpreter`, with the
+  optimized RVV conv kernels from `sw/opt/litert-micro/conv.cc` registered
+  in place of the stock convolutions.
+* **TensorFlow Lite** (recently renamed **LiteRT**) is the full on-device
+  runtime for phones/desktops — dynamic allocation, model loading from
+  files, XNNPack and other delegates. This is what `--cpu-check` runs via
+  the `ai-edge-litert` package.
+
+Both implement the same int8 quantization spec, but they are separate
+codebases, and the spec leaves small freedoms in fixed-point op
+implementations — notably MEAN (rounding of the 7x7 global average) and
+SOFTMAX (the integer exponential approximation). Each choice is worth a
+rounding step or two at the logit level, but softmax renormalizes across
+1000 classes, so those small logit differences become the 3-38 LSB spread
+measured at the output. The conv kernels are *not* the source: on the
+simulator, upstream TFLM reference convolutions match the optimized kernels
+to 1 LSB (cat top-1 raw -60 vs -61). This cross-runtime drift is the reason
+the score gate is an empirical 48-LSB envelope and the label gates are
+aggregate rather than exact — the check compares across runtimes, and
+bit-exactness is only a meaningful expectation within one.
+
 ### Regenerating / resampling the images
 
 The images and `val10_manifest.json` are produced by

@@ -1,0 +1,97 @@
+[
+  {
+    "file": "dog.wav",
+    "esc50_source": "1-100032-A-0.wav",
+    "esc50_category": "dog",
+    "ground_truth_name": "Dog",
+    "ground_truth_indices": [
+      69
+    ]
+  },
+  {
+    "file": "rooster.wav",
+    "esc50_source": "1-26806-A-1.wav",
+    "esc50_category": "rooster",
+    "ground_truth_name": "Crowing, cock-a-doodle-doo",
+    "ground_truth_indices": [
+      96,
+      94
+    ]
+  },
+  {
+    "file": "rain.wav",
+    "esc50_source": "1-17367-A-10.wav",
+    "esc50_category": "rain",
+    "ground_truth_name": "Rain",
+    "ground_truth_indices": [
+      283,
+      284
+    ]
+  },
+  {
+    "file": "sea_waves.wav",
+    "esc50_source": "1-28135-A-11.wav",
+    "esc50_category": "sea_waves",
+    "ground_truth_name": "Waves, surf",
+    "ground_truth_indices": [
+      289
+    ]
+  },
+  {
+    "file": "crackling_fire.wav",
+    "esc50_source": "1-17150-A-12.wav",
+    "esc50_category": "crackling_fire",
+    "ground_truth_name": "Crackle",
+    "ground_truth_indices": [
+      293,
+      292
+    ]
+  },
+  {
+    "file": "crying_baby.wav",
+    "esc50_source": "1-187207-A-20.wav",
+    "esc50_category": "crying_baby",
+    "ground_truth_name": "Baby cry, infant cry",
+    "ground_truth_indices": [
+      20
+    ]
+  },
+  {
+    "file": "sneezing.wav",
+    "esc50_source": "1-26143-A-21.wav",
+    "esc50_category": "sneezing",
+    "ground_truth_name": "Sneeze",
+    "ground_truth_indices": [
+      44
+    ]
+  },
+  {
+    "file": "clock_tick.wav",
+    "esc50_source": "1-21934-A-38.wav",
+    "esc50_category": "clock_tick",
+    "ground_truth_name": "Tick-tock",
+    "ground_truth_indices": [
+      402,
+      401
+    ]
+  },
+  {
+    "file": "helicopter.wav",
+    "esc50_source": "1-172649-A-40.wav",
+    "esc50_category": "helicopter",
+    "ground_truth_name": "Helicopter",
+    "ground_truth_indices": [
+      333
+    ]
+  },
+  {
+    "file": "church_bells.wav",
+    "esc50_source": "1-13571-A-46.wav",
+    "esc50_category": "church_bells",
+    "ground_truth_name": "Church bell",
+    "ground_truth_indices": [
+      196,
+      195
+    ]
+  }
+]

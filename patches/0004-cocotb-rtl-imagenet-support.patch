@@ -1,0 +1,80 @@
+diff --git a/tests/cocotb/BUILD b/tests/cocotb/BUILD
+index 5a4e636d..c3e20839 100644
+--- a/tests/cocotb/BUILD
++++ b/tests/cocotb/BUILD
+@@ -89,6 +89,19 @@ verilator_cocotb_model(
+     ],
+ )
+ 
++# Trace-enabled variant for waveform debug (pass --trace in test_args).
++verilator_cocotb_model(
++    name = "rvv_core_mini_highmem_axi_model_trace",
++    cflags = VERILATOR_BUILD_ARGS,
++    hdl_toplevel = "RvvCoreMiniHighmemAxi",
++    tags = ["manual"],
++    trace = True,
++    verilog_source = "//hdl/chisel/src/coralnpu:RvvCoreMiniHighmemAxi.sv",
++    deps = [
++        "//hdl/verilog:sram_backdoor",
++    ],
++)
++
+ verilator_cocotb_model(
+     name = "rvv_core_mini_itcm512kb_dtcm512kb_axi_model",
+     cflags = VERILATOR_BUILD_ARGS,
+diff --git a/tests/cocotb/tutorial/program.cc b/tests/cocotb/tutorial/program.cc
+index 6a98ab41..a8c25e94 100644
+--- a/tests/cocotb/tutorial/program.cc
++++ b/tests/cocotb/tutorial/program.cc
+@@ -17,9 +17,17 @@
+ // TODO: Add two inputs buffers of 8 uint32_t's (input1_buffer, input2_buffer)
+ // TODO: Add one output buffer of 8 uint32_t's (output_buffer)
+ 
++uint32_t input1_buffer[8] __attribute__((section(".data")));
++uint32_t input2_buffer[8] __attribute__((section(".data")));
++uint32_t output_buffer[8] __attribute__((section(".data")));
++
+ int main(int argc, char** argv) {
+   // TODO: Add code to element wise add/subtract from input1_buffer and
+   // input2_buffer and store the result to output_buffer.
+ 
++  for (int i = 0; i < 8; i++) {
++  output_buffer[i] = input1_buffer[i] + input2_buffer[i];
++  }
++
+   return 0;
+ }
+diff --git a/tests/cocotb/tutorial/tutorial.py b/tests/cocotb/tutorial/tutorial.py
+index 57892648..b42883bb 100644
+--- a/tests/cocotb/tutorial/tutorial.py
++++ b/tests/cocotb/tutorial/tutorial.py
+@@ -28,9 +28,28 @@ async def core_mini_axi_tutorial(dut):
+     cocotb.start_soon(core_mini_axi.clock.start())
+ 
+     # TODO: Load your program into ITCM with "load_elf"
++    r = runfiles.Create()
++    elf_path = r.Rlocation(
++        "coralnpu_hw/tests/cocotb/tutorial/coralnpu_v2_program.elf")
+ 
+-    # TODO: Write your program inputs
++    
++    with open(elf_path, "rb") as f:
++        entry_point = await core_mini_axi.load_elf(f)
++
++        # TODO: Write your program inputs
++        inputs1_addr = core_mini_axi.lookup_symbol(f, "input1_buffer")
++        inputs2_addr = core_mini_axi.lookup_symbol(f, "input2_buffer")
++        outputs_addr = core_mini_axi.lookup_symbol(f, "output_buffer")
++        
++    input1_data = np.arange(8, dtype=np.uint32)
++    input2_data = 8994 * np.ones(8, dtype=np.uint32)
++    await core_mini_axi.write(inputs1_addr, input1_data)
++    await core_mini_axi.write(inputs2_addr, input2_data)
+ 
+     # TODO: Run your program and wait for halted
++    await core_mini_axi.execute_from(entry_point)
++    await core_mini_axi.wait_for_halted()
+ 
+     # TODO: Read your program outputs and print the result
++    rdata = (await core_mini_axi.read(outputs_addr, 4 * 8)).view(np.uint32)
++    print(f"We got {rdata}")
