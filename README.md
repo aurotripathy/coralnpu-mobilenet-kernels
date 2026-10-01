@@ -136,6 +136,16 @@ collapses these to ~0, which is the failure signal. See
 `overlay/tests/npusim_examples/mobilenet/README.md` for the full flow and
 log-line reference.
 
+## PyTorch reference (optional, host-side)
+
+`apply.sh` copies `tests/npusim_examples/mobilenet/pytorch/`. It is not part of
+the Bazel run: two PyTorch MobileNet V1 alpha=0.25 models load weights from
+the shipped `.tflite` and are checked against it. `mobilenet_v1_fp32.py` is a
+readable float32 reference; `mobilenet_v1_int8.py` reproduces the LiteRT-Micro
+integer path. Needs `torch`, `numpy`, and `ai-edge-litert`. See
+`overlay/tests/npusim_examples/mobilenet/pytorch/README.md` for the commands
+and the per-stage bit-exact check.
+
 ## Gemma 3 270M (optional, extra host prep)
 
 `apply.sh` copies the Gemma files and applies the DDR patch automatically, but
