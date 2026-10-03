@@ -42,6 +42,12 @@ Standalone use (with an interpreter-equipped python):
 
     python3 utils/cpu_reference.py --model models/<model>.tflite \
         --npy images_224x224x3/cat_224x224_real.npy
+
+    or better yet, with the model and image paths already set:
+    cd /home/coralnpu/coralnpu/tests/npusim_examples/mobilenet
+    ~/litertenv/bin/python utils/cpu_reference.py \ 
+    --model models/mobilenet_v1_025_224_int8_real.tflite \
+    --npy images_224x224x3/cat_224x224_real.npy
 """
 
 import argparse

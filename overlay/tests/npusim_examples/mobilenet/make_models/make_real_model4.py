@@ -37,6 +37,7 @@ def rep_dataset():
     for _ in range(63):
         yield [rng.uniform(0.0, 255.0, size=(1, 224, 224, 3)).astype(np.float32)]
 
+# Converts a TensorFlow model written in Keras into TensorFlow Lite model with int8 quantization.
 converter = tf.lite.TFLiteConverter.from_keras_model(model)
 converter.optimizations = [tf.lite.Optimize.DEFAULT]
 converter.representative_dataset = rep_dataset
@@ -47,6 +48,7 @@ tflite_model = converter.convert()
 open(OUT, 'wb').write(tflite_model)
 print('model size:', len(tflite_model))
 
+# Runs the TensorFlow Lite model with int8 quantization.
 interp = tf.lite.Interpreter(model_content=tflite_model)
 interp.allocate_tensors()
 i = interp.get_input_details()[0]

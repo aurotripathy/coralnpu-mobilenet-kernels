@@ -140,6 +140,168 @@ whatever `val_*` files are present, so no `BUILD` edit is needed.
 3. Output scores are quantized softmax probabilities:
    `probability = (raw + 128) / 256`.
 
+## Flow by which the Keras-based MobileNet V1 model gets converted to an executable binary on the CoralNPU
+
+The model graph is never compiled. The Keras network becomes a quantized
+flatbuffer, the flatbuffer becomes a byte array, and that array is linked into
+a RISC-V program whose code is the TFLite Micro interpreter plus hand-written
+RVV kernels. The interpreter walks the flatbuffer at run time on the CoralNPU
+core. There are two compilers in the chain, and neither sees the model as code:
+the TFLite converter (graph lowering and quantization, host side) and the
+RISC-V C++ cross-compiler (interpreter, kernels, runtime). There is no IREE or
+MLIR stage anywhere in this repo.
+
+### Stage 1 — Host: Keras → int8 `.tflite` (`make_models/make_real_model4.py`)
+
+```python
+model = tf.keras.applications.MobileNet(
+    input_shape=(224, 224, 3), alpha=0.25, weights='imagenet')
+
+cat = np.load(CAT_NPY).astype(np.float32)  # raw [0,255] pixels
+ref = model(np.expand_dims(cat / 127.5 - 1.0, 0)).numpy()
+
+conv1 = model.get_layer('conv1')
+bn1 = model.get_layer('conv1_bn')
+(W,) = conv1.get_weights()
+gamma, beta, mean, var = bn1.get_weights()
+conv1.set_weights([W / 127.5])
+bn1.set_weights([gamma, beta, mean + W.sum(axis=(0, 1, 2)), var])
+```
+
+1. Instantiate Keras Applications MobileNet V1 (alpha=0.25, 224x224, 1000
+   classes) with the pretrained ImageNet weights.
+2. Fold the `x/127.5 - 1` preprocessing into `conv1`'s weights and
+   `conv1_bn.moving_mean`, so the model takes raw `[0, 255]` pixels and no
+   rescale op is in the graph.
+3. Run `tf.lite.TFLiteConverter.from_keras_model`. This is the real "model
+   compiler" step: it traces the Keras graph to TensorFlow ops, lowers them to
+   TFLite builtins (CONV_2D, DEPTHWISE_CONV_2D, MEAN, RESHAPE, SOFTMAX), folds
+   BatchNorm into conv biases, fuses ReLU6, and — driven by the 64-image
+   representative dataset — does full-integer post-training quantization:
+   per-channel symmetric int8 weights, int32 biases, per-tensor int8
+   activations, int8 I/O.
+
+```python
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+converter.representative_dataset = rep_dataset
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+converter.inference_input_type = tf.int8
+converter.inference_output_type = tf.int8
+tflite_model = converter.convert()
+open(OUT, 'wb').write(tflite_model)
+```
+
+Output: `models/mobilenet_v1_025_224_int8_real.tflite` (584 KB), a flatbuffer
+with the op graph, tensor shapes, quant params, and weights. Checked into the
+repo; everything downstream is Bazel.
+
+### Stage 2 — Bazel: `.tflite` → C byte array (`generate_cc_arrays`)
+
+TFLM's `generate_cc_arrays.py` hex-dumps the file into
+`alignas(16) const unsigned char g_mobilenet_v1_025_224_int8_real_model_data[]`,
+plus a header with `extern` and a `_size` constant.
+`cc_library(mobilenet_v1_025_224_int8_real_lib)` wraps it. The bytes are
+unchanged; this just makes them linkable.
+
+### Stage 3 — Bazel: cross-compile and link the interpreter program (`coralnpu_v2_binary`)
+
+`run_full_mobilenet_v1_real.cc` is the entry point. It declares the data
+buffers the host will poke (`inference_input`, `inference_output`,
+`inference_status`) plus a 4 MB `tensor_arena` in `.extdata`, and in `main()`:
+
+```cpp
+const tflite::Model* model =
+    tflite::GetModel(g_mobilenet_v1_025_224_int8_real_model_data);
+MobilenetOpResolver op_resolver;
+RegisterOps(op_resolver);
+static CycleProfiler profiler;
+tflite::MicroInterpreter interpreter(model, op_resolver, tensor_arena,
+                                     kTensorArenaSize,
+                                     /*resource_variables=*/nullptr,
+                                     &profiler);
+if (interpreter.AllocateTensors() != kTfLiteOk) { ... }
+```
+
+`RegisterOps` is where CoralNPU plugs in its own kernels. CONV_2D and
+DEPTHWISE_CONV_2D are registered with
+`coralnpu_v2::opt::litert_micro::Register_CONV_2D()` /
+`Register_DEPTHWISE_CONV_2D()` from `sw/opt/litert-micro/`, while the remaining
+ops (MEAN, SOFTMAX, RESHAPE, ...) use stock TFLM reference kernels. The
+CoralNPU registration reuses TFLM's `prepare` and swaps in its own `invoke`:
+
+```cpp
+TFLMRegistration Register_CONV_2D() {
+  auto registration = tflite::Register_CONV_2D();
+  // Prepare is the same as the reference implementation.
+  registration.invoke = ConvEval;
+```
+
+`ConvEval` → `ConvPerChannel` → shape-based dispatch to RVV intrinsics kernels
+(`Conv_3_3_3_8` for the stem, `Conv_1x1_Pointwise` for the 13 pointwise convs,
+`Conv_4_4_*` variants, and `reference_integer_ops::ConvPerChannel` as
+fallback).
+
+The `coralnpu_v2_binary` macro (`rules/coralnpu_v2.bzl`) then:
+
+* applies a platform transition to `//platforms:coralnpu_v2_semihosting`, so
+  every dep is built with the RISC-V toolchain:
+  `-march=rv32imf_zve32f_zicsr_zifencei_zbb_zfbfmin_zvfbfmin_zvfbfwma`
+  (`toolchain/cc_toolchain_config.bzl`), i.e. RV32 with the Zve32f vector
+  extension the kernels target;
+* generates a linker script from `toolchain/coralnpu_tcm.ld.tpl` with
+  ITCM/DTCM at 1 MB each (highmem). `.text`/`.rodata` (code + the model array)
+  → ITCM, `.data` (I/O buffers) → DTCM, `.extdata` (tensor arena) → EXTMEM at
+  `0x20000000`;
+* compiles the sources and links with `-Wl,-T,<script>`, adding
+  `//toolchain/crt:crt_semihosting` for startup/`printf`;
+* emits `run_full_mobilenet_v1_real_binary.elf` (and `.bin` via `objcopy`,
+  `.vmem` via `srec_cat`).
+
+### Stage 4 — Run: host driver + simulator
+
+`npusim_run_real_mobilenet.py` loads the ELF into `CoralNPUV2Simulator` (the
+MPACT ISS, `@coralnpu_mpact`), reads the symbol table, writes the
+`uint8 → int8` image into `inference_input`, runs to `ebreak`, then reads
+`inference_output` and `inference_status`. On the core,
+`MicroInterpreter::AllocateTensors` plans the arena from the flatbuffer, and
+`Invoke()` walks the op list, calling each registered kernel. For the RTL path
+(`tests/cocotb/imagenet`), the same ELF is loaded into the Verilator/VCS
+testbench via HTIF.
+
+### Pipeline summary
+
+```
+tf.keras.applications.MobileNet(alpha=0.25, weights='imagenet')
+   |  fold x/127.5-1 into conv1 + conv1_bn            (make_real_model4.py, host)
+   |  TFLiteConverter: lower to TFLite builtins,
+   |  BN fold, ReLU6 fuse, int8 PTQ (64-image calib)
+   v
+models/mobilenet_v1_025_224_int8_real.tflite          <- committed artifact
+   |  generate_cc_arrays (TFLM tool, genrule)
+   v
+g_mobilenet_v1_025_224_int8_real_model_data[]  (.rodata)
+   |  cc_library
+   v
+coralnpu_v2_binary                                    (Bazel, RISC-V transition)
+   +- run_full_mobilenet_v1_real.cc   GetModel -> MicroInterpreter
+   +- @tflite_micro  framework + reference kernels (MEAN, SOFTMAX, ...)
+   +- sw/opt/litert-micro  CONV_2D / DEPTHWISE_CONV_2D in RVV intrinsics
+   +- crt_semihosting, generated TCM linker script
+   v
+run_full_mobilenet_v1_real_binary.elf  (+ .bin, .vmem)
+   |  py_binary runfiles
+   v
+CoralNPUV2Simulator (MPACT ISS)  or  cocotb RTL testbench
+   write inference_input -> run -> read inference_output
+```
+
+The split of responsibilities: the TFLite converter decides *what* ops run and
+at what precision; TFLite Micro decides *the order and memory plan* at run time
+from the flatbuffer; the CoralNPU kernels in `sw/opt/litert-micro/` decide
+*how* each conv executes on the vector unit; the RISC-V toolchain and linker
+script decide *where in memory* it all lives.
+
 ## From .tflite to RISC-V ELF: how the model gets into the simulator
 
 The `.tflite` model is never converted or lowered into code. Its raw flatbuffer
